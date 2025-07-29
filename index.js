@@ -1,21 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import pkg from 'pg';
-
-const { Pool } = pkg;
+import pool from './db.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
 
 app.get('/', (req, res) => {
   res.send('Servidor Uniforme.com está rodando! 🚀');
@@ -28,6 +19,27 @@ app.get('/test-db', async (req, res) => {
   } catch (err) {
     console.error('Erro ao conectar no banco:', err);
     res.status(500).send('Erro no banco de dados');
+  }
+});
+
+// ✅ Apenas esta rota para criar a tabela
+app.get('/criar-tabela', async (req, res) => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS usuarios (
+        id SERIAL PRIMARY KEY,
+        nome TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        senha TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        ativo BOOLEAN DEFAULT true,
+        data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    res.send('Tabela "usuarios" criada com sucesso!');
+  } catch (err) {
+    console.error('Erro ao criar tabela:', err);
+    res.status(500).send('Erro ao criar a tabela');
   }
 });
 
