@@ -1,17 +1,23 @@
 import express from 'express';
 import cors from 'cors';
-import pool from './db.js';
+import pool from './db.js'; // conexão com o banco
+import rotaUsuarios from './routes/usuarios.js';
+import rotaFuncoes from './routes/funcoes.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use('/usuarios', rotaUsuarios);
+app.use('/funcoes', rotaFuncoes);
 
+// Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
   res.send('Servidor Uniforme.com está rodando! 🚀');
 });
 
+// Rota de teste para verificar conexão com o banco
 app.get('/test-db', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
@@ -22,7 +28,7 @@ app.get('/test-db', async (req, res) => {
   }
 });
 
-// ✅ Apenas esta rota para criar a tabela
+// Rota opcional para criação da tabela usuarios (pode ser mantida para emergências)
 app.get('/criar-tabela', async (req, res) => {
   try {
     const sql = `
@@ -31,7 +37,7 @@ app.get('/criar-tabela', async (req, res) => {
         nome TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         senha TEXT NOT NULL,
-        tipo TEXT NOT NULL,
+        funcao TEXT NOT NULL,
         ativo BOOLEAN DEFAULT true,
         email_envio TEXT NOT NULL,
         senha_envio TEXT NOT NULL,
@@ -39,7 +45,7 @@ app.get('/criar-tabela', async (req, res) => {
         porta_smtp INTEGER NOT NULL,
         use_ssl_tls TEXT NOT NULL,
         data_cadastro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
+      )
     `;
     await pool.query(sql);
     res.send('Tabela "usuarios" criada (ou atualizada) com sucesso!');
@@ -49,7 +55,7 @@ app.get('/criar-tabela', async (req, res) => {
   }
 });
 
-
+// Inicializa servidor
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
