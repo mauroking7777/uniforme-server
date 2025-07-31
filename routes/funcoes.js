@@ -35,4 +35,31 @@ router.post('/', async (req, res) => {
   }
 });
 
+// Atualizar uma função existente
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { nome, descricao } = req.body;
+
+  if (!nome || nome.trim() === '') {
+    return res.status(400).json({ erro: 'O nome da função é obrigatório.' });
+  }
+
+  try {
+    const result = await db.query(
+      'UPDATE funcoes SET nome = $1, descricao = $2 WHERE id = $3 RETURNING *',
+      [nome.trim(), descricao || null, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ erro: 'Função não encontrada.' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Erro ao atualizar função:', err);
+    res.status(500).json({ erro: 'Erro ao atualizar função.' });
+  }
+});
+
+
 export default router;
