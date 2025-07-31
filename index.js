@@ -3,6 +3,7 @@ import cors from 'cors';
 import pool from './db.js'; // conexão com o banco
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
+import rotaModelos from './routes/modelos.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,6 +12,7 @@ app.use(cors());
 app.use(express.json());
 app.use('/usuarios', rotaUsuarios);
 app.use('/funcoes', rotaFuncoes);
+app.use('/modelos', rotaModelos);
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
@@ -54,6 +56,8 @@ app.get('/criar-tabela', async (req, res) => {
     res.status(500).send('Erro ao criar a tabela');
   }
 });
+
+
 
 // Inicializa servidor
 app.listen(PORT, () => {
