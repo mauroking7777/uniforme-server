@@ -4,6 +4,7 @@ import pool from './db.js'; // conexão com o banco
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
 import rotaModelos from './routes/modelos.js';
+import tecidosRoutes from './tecidos.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,6 +14,7 @@ app.use(express.json());
 app.use('/usuarios', rotaUsuarios);
 app.use('/funcoes', rotaFuncoes);
 app.use('/modelos', rotaModelos);
+app.use('/tecidos', tecidosRoutes);
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
