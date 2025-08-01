@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
 
 // Cadastrar novo modelo
 router.post('/', async (req, res) => {
-  const { nome, descricao } = req.body;
+  const { nome, descricao, tipo_gola, tipo_manga, detalhamento_manga } = req.body;
 
   if (!nome || nome.trim() === '') {
     return res.status(400).json({ erro: 'O nome do modelo é obrigatório.' });
@@ -24,8 +24,16 @@ router.post('/', async (req, res) => {
 
   try {
     const result = await db.query(
-      'INSERT INTO modelos (nome, descricao) VALUES ($1, $2) RETURNING *',
-      [nome.trim(), descricao || null]
+      `INSERT INTO modelos (nome, descricao, tipo_gola, tipo_manga, detalhamento_manga)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        nome.trim(),
+        descricao || null,
+        tipo_gola || null,
+        tipo_manga || null,
+        detalhamento_manga || null
+      ]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -37,7 +45,7 @@ router.post('/', async (req, res) => {
 // Atualizar um modelo existente
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { nome, descricao } = req.body;
+  const { nome, descricao, tipo_gola, tipo_manga, detalhamento_manga } = req.body;
 
   if (!nome || nome.trim() === '') {
     return res.status(400).json({ erro: 'O nome do modelo é obrigatório.' });
@@ -45,8 +53,18 @@ router.put('/:id', async (req, res) => {
 
   try {
     const result = await db.query(
-      'UPDATE modelos SET nome = $1, descricao = $2 WHERE id = $3 RETURNING *',
-      [nome.trim(), descricao || null, id]
+      `UPDATE modelos
+       SET nome = $1, descricao = $2, tipo_gola = $3, tipo_manga = $4, detalhamento_manga = $5
+       WHERE id = $6
+       RETURNING *`,
+      [
+        nome.trim(),
+        descricao || null,
+        tipo_gola || null,
+        tipo_manga || null,
+        detalhamento_manga || null,
+        id
+      ]
     );
 
     if (result.rowCount === 0) {
