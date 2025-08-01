@@ -4,7 +4,8 @@ import pool from './db.js'; // conexão com o banco
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
 import rotaModelos from './routes/modelos.js';
-import tecidosRoutes from './tecidos.js';
+import tecidosRoutes from './routes/tecidos.js';
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
