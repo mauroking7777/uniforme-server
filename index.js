@@ -1,10 +1,13 @@
 import express from 'express';
 import cors from 'cors';
-import pool from './db.js'; // conexão com o banco
+import pool from './db.js';
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
 import rotaModelos from './routes/modelos.js';
 import tecidosRoutes from './routes/tecidos.js';
+import rotaTipoGola from './routes/tipoGola.js';
+import rotaTipoManga from './routes/tipoManga.js';
+import rotaDetalhamentoManga from './routes/detalhamentoManga.js';
 
 
 const app = express();
@@ -16,6 +19,9 @@ app.use('/usuarios', rotaUsuarios);
 app.use('/funcoes', rotaFuncoes);
 app.use('/modelos', rotaModelos);
 app.use('/tecidos', tecidosRoutes);
+app.use('/tipo-gola', rotaTipoGola);
+app.use('/tipo-manga', rotaTipoManga);
+app.use('/detalhamento-manga', rotaDetalhamentoManga);
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
