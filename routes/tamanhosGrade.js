@@ -84,11 +84,11 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// PUT - Vincular vários tamanhos a uma grade
+// PUT - Vincular tamanhos à grade (sincroniza: remove os antigos e insere os novos)
 router.put('/vincular-grade', async (req, res) => {
   const { grade_id, tamanhos_ids } = req.body;
 
-  if (!grade_id || !Array.isArray(tamanhos_ids) || tamanhos_ids.length === 0) {
+  if (!grade_id || !Array.isArray(tamanhos_ids)) {
     return res.status(400).json({ erro: 'grade_id e tamanhos_ids são obrigatórios.' });
   }
 
@@ -97,23 +97,29 @@ router.put('/vincular-grade', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    const query = `
-      UPDATE tamanhos_grade
-      SET grade_id = $1
-      WHERE id = ANY($2::int[])
-    `;
-    await client.query(query, [grade_id, tamanhos_ids]);
+    // 1. Remove todos os tamanhos antigos da grade
+    await client.query(
+      `UPDATE tamanhos_grade SET grade_id = NULL WHERE grade_id = $1`,
+      [grade_id]
+    );
+
+    // 2. Atribui os novos tamanhos, se houver
+    if (tamanhos_ids.length > 0) {
+      await client.query(
+        `UPDATE tamanhos_grade SET grade_id = $1 WHERE id = ANY($2::int[])`,
+        [grade_id, tamanhos_ids]
+      );
+    }
 
     await client.query('COMMIT');
-    res.status(200).json({ mensagem: 'Tamanhos vinculados com sucesso.' });
+    res.status(200).json({ mensagem: 'Tamanhos atualizados com sucesso.' });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Erro ao vincular tamanhos à grade:', err);
-    res.status(500).json({ erro: 'Erro ao vincular tamanhos à grade.' });
+    console.error('Erro ao atualizar tamanhos da grade:', err);
+    res.status(500).json({ erro: 'Erro ao atualizar tamanhos da grade.' });
   } finally {
     client.release();
   }
 });
-
 
 export default router;
