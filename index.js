@@ -10,6 +10,7 @@ import rotaTipoManga from './routes/tipoManga.js';
 import rotaDetalhamentoManga from './routes/detalhamentoManga.js';
 import rotaGrades from './routes/grades.js';
 import rotaTamanhosGrade from './routes/tamanhosGrade.js';
+import tamanhosGradeRouter from './routes/tamanhosGrade.js';
 
 
 const app = express();
@@ -26,6 +27,7 @@ app.use('/tipo-manga', rotaTipoManga);
 app.use('/detalhamento-manga', rotaDetalhamentoManga);
 app.use('/grades', rotaGrades);
 app.use('/tamanhos-grade', rotaTamanhosGrade);
+app.use('/tamanhos-grade', tamanhosGradeRouter);
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {

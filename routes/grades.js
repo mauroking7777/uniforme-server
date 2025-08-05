@@ -112,5 +112,25 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// ✅ GET - Buscar tamanhos por grade_id
+router.get('/por-grade/:gradeId', async (req, res) => {
+  const { gradeId } = req.params;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, tamanho, ordem_exibicao 
+       FROM tamanhos_grade 
+       WHERE grade_id = $1 
+       ORDER BY ordem_exibicao`,
+      [gradeId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Erro ao buscar tamanhos por grade_id:', err);
+    res.status(500).json({ erro: 'Erro ao buscar tamanhos.' });
+  }
+});
+
 
 export default router;
