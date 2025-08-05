@@ -72,6 +72,22 @@ app.get('/criar-tabela', async (req, res) => {
   }
 });
 
+app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
+  const { grade_id } = req.params;
+
+  try {
+    const resultado = await pool.query(
+      'SELECT id, tamanho, ordem_exibicao FROM tamanhos_grade WHERE grade_id = $1 ORDER BY ordem_exibicao ASC',
+      [grade_id]
+    );
+    res.json(resultado.rows);
+  } catch (erro) {
+    console.error('Erro ao buscar tamanhos da grade:', erro);
+    res.status(500).json({ erro: 'Erro ao buscar tamanhos da grade' });
+  }
+});
+
+
 
 
 // Inicializa servidor
