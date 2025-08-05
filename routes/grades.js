@@ -64,32 +64,57 @@ router.post('/', async (req, res) => {
 
 
 // ================================
-// PUT - Atualizar uma grade
+// PUT - Atualizar uma grade (inclui os tamanhos)
 // ================================
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { nome, descricao } = req.body;
+  const { nome, descricao, tamanhos } = req.body;
 
   if (!nome || nome.trim() === '') {
     return res.status(400).json({ erro: 'O nome da grade é obrigatório.' });
   }
 
+  const client = await pool.connect();
+
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    // Atualiza a grade
+    const result = await client.query(
       'UPDATE grades SET nome = $1, descricao = $2 WHERE id = $3 RETURNING *',
       [nome.trim(), descricao || null, id]
     );
 
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ erro: 'Grade não encontrada.' });
     }
 
+    // Remove tamanhos antigos da grade
+    await client.query('DELETE FROM tamanhos_grade WHERE grade_id = $1', [id]);
+
+    // Insere os tamanhos novos (se houver)
+    if (Array.isArray(tamanhos) && tamanhos.length > 0) {
+      const insertPromises = tamanhos.map((t) =>
+        client.query(
+          'INSERT INTO tamanhos_grade (grade_id, tamanho, ordem_exibicao) VALUES ($1, $2, $3)',
+          [id, t.tamanho, t.ordem_exibicao || 0]
+        )
+      );
+      await Promise.all(insertPromises);
+    }
+
+    await client.query('COMMIT');
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('Erro ao atualizar grade:', err);
+    await client.query('ROLLBACK');
+    console.error('Erro ao atualizar grade com tamanhos:', err);
     res.status(500).json({ erro: 'Erro ao atualizar grade.' });
+  } finally {
+    client.release();
   }
 });
+
 
 
 // ================================
