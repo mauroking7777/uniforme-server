@@ -3,7 +3,10 @@ import pool from '../db.js';
 
 const router = express.Router();
 
+
+// ================================
 // GET - Listar todas as grades
+// ================================
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM grades ORDER BY nome');
@@ -14,7 +17,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST - Cadastrar nova grade com tamanhos
+
+// ===============================================
+// POST - Cadastrar nova grade com tamanhos juntos
+// ===============================================
 router.post('/', async (req, res) => {
   const { nome, descricao, tamanhos } = req.body;
 
@@ -27,14 +33,14 @@ router.post('/', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // 1. Inserir grade
+    // 1. Inserir a grade
     const gradeResult = await client.query(
       'INSERT INTO grades (nome, descricao) VALUES ($1, $2) RETURNING *',
       [nome.trim(), descricao || null]
     );
     const novaGrade = gradeResult.rows[0];
 
-    // 2. Inserir tamanhos vinculados (se houver)
+    // 2. Inserir os tamanhos vinculados
     if (Array.isArray(tamanhos) && tamanhos.length > 0) {
       const insertPromises = tamanhos.map((t) => {
         return client.query(
@@ -57,7 +63,9 @@ router.post('/', async (req, res) => {
 });
 
 
-// PUT - Atualizar grade
+// ================================
+// PUT - Atualizar uma grade
+// ================================
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
   const { nome, descricao } = req.body;
@@ -83,7 +91,10 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE - Remover grade
+
+// ================================
+// DELETE - Remover uma grade
+// ================================
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -100,5 +111,6 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ erro: 'Erro ao excluir grade.' });
   }
 });
+
 
 export default router;
