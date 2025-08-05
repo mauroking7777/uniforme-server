@@ -14,25 +14,48 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST - Cadastrar nova grade
+// POST - Cadastrar nova grade com tamanhos
 router.post('/', async (req, res) => {
-  const { nome, descricao } = req.body;
+  const { nome, descricao, tamanhos } = req.body;
 
   if (!nome || nome.trim() === '') {
     return res.status(400).json({ erro: 'O nome da grade é obrigatório.' });
   }
 
+  const client = await pool.connect();
+
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    // 1. Inserir grade
+    const gradeResult = await client.query(
       'INSERT INTO grades (nome, descricao) VALUES ($1, $2) RETURNING *',
       [nome.trim(), descricao || null]
     );
-    res.status(201).json(result.rows[0]);
+    const novaGrade = gradeResult.rows[0];
+
+    // 2. Inserir tamanhos vinculados (se houver)
+    if (Array.isArray(tamanhos) && tamanhos.length > 0) {
+      const insertPromises = tamanhos.map((t) => {
+        return client.query(
+          'INSERT INTO tamanhos_grade (grade_id, tamanho, ordem_exibicao) VALUES ($1, $2, $3)',
+          [novaGrade.id, t.tamanho, t.ordem_exibicao || 0]
+        );
+      });
+      await Promise.all(insertPromises);
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json(novaGrade);
   } catch (err) {
-    console.error('Erro ao cadastrar grade:', err);
+    await client.query('ROLLBACK');
+    console.error('Erro ao cadastrar grade com tamanhos:', err);
     res.status(500).json({ erro: 'Erro ao cadastrar grade.' });
+  } finally {
+    client.release();
   }
 });
+
 
 // PUT - Atualizar grade
 router.put('/:id', async (req, res) => {
