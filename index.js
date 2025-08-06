@@ -11,6 +11,7 @@ import rotaDetalhamentoManga from './routes/detalhamentoManga.js';
 import rotaGrades from './routes/grades.js';
 import rotaTamanhosGrade from './routes/tamanhosGrade.js';
 import tamanhosGradeRouter from './routes/tamanhosGrade.js';
+import rotaSetores from './routes/setores.js';
 
 
 const app = express();
@@ -19,6 +20,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use('/usuarios', rotaUsuarios);
+app.use('/setores', rotaSetores);
 app.use('/funcoes', rotaFuncoes);
 app.use('/modelos', rotaModelos);
 app.use('/tecidos', tecidosRoutes);
