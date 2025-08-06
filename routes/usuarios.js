@@ -102,4 +102,36 @@ router.post('/:id/acessos', async (req, res) => {
   }
 });
 
+// Deletar um usuário
+router.delete('/:id', async (req, res) => {
+  const { id } = req.params;
+
+  const client = await db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Primeiro, remove os acessos relacionados (evita erro de FK)
+    await client.query('DELETE FROM acessos_usuario WHERE usuario_id = $1', [id]);
+
+    // Depois, remove o usuário
+    const resultado = await client.query('DELETE FROM usuarios WHERE id = $1 RETURNING *', [id]);
+
+    await client.query('COMMIT');
+
+    if (resultado.rowCount === 0) {
+      return res.status(404).json({ erro: 'Usuário não encontrado.' });
+    }
+
+    res.status(200).json({ mensagem: 'Usuário excluído com sucesso.' });
+  } catch (erro) {
+    await client.query('ROLLBACK');
+    console.error('Erro ao excluir usuário:', erro);
+    res.status(500).json({ erro: 'Erro ao excluir usuário.' });
+  } finally {
+    client.release();
+  }
+});
+
+
 export default router;
