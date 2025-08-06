@@ -43,7 +43,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ✅ Buscar os acessos de um usuário
+// Buscar acessos de um usuário
 router.get('/:id/acessos', async (req, res) => {
   const { id } = req.params;
 
@@ -66,10 +66,10 @@ router.get('/:id/acessos', async (req, res) => {
   }
 });
 
-// ✅ Salvar (ou atualizar) os acessos de um usuário
+// Salvar (ou atualizar) acessos de um usuário
 router.post('/:id/acessos', async (req, res) => {
   const { id } = req.params;
-  const { setores } = req.body; // array de IDs
+  const { setores } = req.body; // deve ser um array de IDs numéricos
 
   if (!Array.isArray(setores)) {
     return res.status(400).json({ erro: 'O campo "setores" deve ser um array de IDs.' });
@@ -80,10 +80,10 @@ router.post('/:id/acessos', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Remove acessos anteriores
+    // Remove acessos antigos
     await client.query('DELETE FROM acessos_usuario WHERE usuario_id = $1', [id]);
 
-    // Insere os novos
+    // Insere novos acessos
     for (const setorId of setores) {
       await client.query(
         'INSERT INTO acessos_usuario (usuario_id, setor_id) VALUES ($1, $2)',
