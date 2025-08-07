@@ -43,6 +43,48 @@ router.post('/', async (req, res) => {
   }
 });
 
+// ✅ NOVA ROTA: Atualizar um usuário
+router.put('/:id', async (req, res) => {
+  const { id } = req.params;
+  const { nome, email, senha, funcao } = req.body;
+
+  if (!nome || !email || !funcao) {
+    return res.status(400).json({ erro: 'Preencha todos os campos obrigatórios.' });
+  }
+
+  try {
+    let query;
+    let values;
+
+    if (senha) {
+      query = `
+        UPDATE usuarios 
+        SET nome = $1, email = $2, senha = $3, funcao = $4
+        WHERE id = $5 
+        RETURNING *`;
+      values = [nome, email, senha, funcao, id];
+    } else {
+      query = `
+        UPDATE usuarios 
+        SET nome = $1, email = $2, funcao = $3
+        WHERE id = $4 
+        RETURNING *`;
+      values = [nome, email, funcao, id];
+    }
+
+    const resultado = await db.query(query, values);
+
+    if (resultado.rowCount === 0) {
+      return res.status(404).json({ erro: 'Usuário não encontrado.' });
+    }
+
+    res.json(resultado.rows[0]);
+  } catch (err) {
+    console.error('Erro ao atualizar usuário:', err);
+    res.status(500).json({ erro: 'Erro interno ao atualizar usuário.' });
+  }
+});
+
 // Buscar acessos de um usuário
 router.get('/:id/acessos', async (req, res) => {
   const { id } = req.params;
@@ -132,6 +174,5 @@ router.delete('/:id', async (req, res) => {
     client.release();
   }
 });
-
 
 export default router;
