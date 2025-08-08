@@ -12,6 +12,7 @@ router.post('/ordens-uniformes', async (req, res) => {
     data_entrega,
     cliente,
     usuario_id,
+    tipo_ordem // ✅ novo campo adicionado aqui
   } = req.body;
 
   // Validação básica
@@ -21,7 +22,8 @@ router.post('/ordens-uniformes', async (req, res) => {
     !prazo_entrega ||
     !data_entrega ||
     !cliente ||
-    !usuario_id
+    !usuario_id ||
+    !tipo_ordem // ✅ também obrigatório
   ) {
     return res.status(400).json({ erro: 'Preencha todos os campos obrigatórios.' });
   }
@@ -29,15 +31,14 @@ router.post('/ordens-uniformes', async (req, res) => {
   try {
     const nova = await db.query(
       `INSERT INTO ordem_producao_uniformes_dados_ordem
-        (numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id)
-       VALUES ($1, $2, $3, $4, $5, 'rascunho', $6)
+        (numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id, tipo_ordem)
+       VALUES ($1, $2, $3, $4, $5, 'rascunho', $6, $7)
        RETURNING *`,
-      [numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id]
+      [numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id, tipo_ordem]
     );
 
     res.status(201).json(nova.rows[0]);
   } catch (err) {
-    // 🔧 Log temporário via resposta (já que o console do Render é inacessível)
     res.status(500).json({
       erro: 'Erro ao criar ordem.',
       detalhes: err.message,
@@ -47,11 +48,13 @@ router.post('/ordens-uniformes', async (req, res) => {
         prazo_entrega,
         data_entrega,
         cliente,
-        usuario_id
+        usuario_id,
+        tipo_ordem
       }
     });
   }
 });
+
 
 // Listar todas as ordens
 router.get('/ordens-uniformes', async (req, res) => {
