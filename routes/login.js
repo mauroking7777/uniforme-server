@@ -34,7 +34,7 @@ router.post('/login', async (req, res) => {
       [usuario.id]
     );
   
-    const acessos = acessosQuery.rows.map(a => a.nome.toLowerCase());
+    const acessos = acessosQuery.rows.map(a => a.nome);
   
     // 🔒 Gera token com os dados do usuário
     const agora = new Date();
