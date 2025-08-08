@@ -5,6 +5,8 @@ const router = express.Router();
 
 // Criar nova ordem de produção de uniformes
 router.post('/ordens-uniformes', async (req, res) => {
+  console.log('📦 Dados recebidos:', req.body); // 👈 coloca aqui
+
   const { numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id } = req.body;
 
   if (!numero_ordem || !data_entrada || !prazo_entrega || !data_entrega || !cliente || !usuario_id) {
