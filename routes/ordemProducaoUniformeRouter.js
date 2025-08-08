@@ -136,4 +136,20 @@ router.delete('/ordens-uniformes/:id', async (req, res) => {
   }
 });
 
+// Listar todas as ordens de um usuário específico
+router.get('/ordens-uniformes/usuario/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const resultado = await db.query(
+      'SELECT * FROM ordem_producao_uniformes_dados_ordem WHERE usuario_id = $1 ORDER BY id DESC',
+      [id]
+    );
+    res.json(resultado.rows);
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar ordens do usuário.' });
+  }
+});
+
+
 export default router;
