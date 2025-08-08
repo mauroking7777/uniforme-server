@@ -5,8 +5,6 @@ const router = express.Router();
 
 // Criar nova ordem de produção de uniformes
 router.post('/ordens-uniformes', async (req, res) => {
-  console.log('📦 Dados recebidos no req.body:', req.body);
-
   const {
     numero_ordem,
     data_entrada,
@@ -15,15 +13,6 @@ router.post('/ordens-uniformes', async (req, res) => {
     cliente,
     usuario_id,
   } = req.body;
-
-  // Log de cada campo individual
-  console.log('🧪 Campos recebidos individualmente:');
-  console.log('numero_ordem:', numero_ordem);
-  console.log('data_entrada:', data_entrada);
-  console.log('prazo_entrega:', prazo_entrega);
-  console.log('data_entrega:', data_entrega);
-  console.log('cliente:', cliente);
-  console.log('usuario_id:', usuario_id);
 
   // Validação básica
   if (
@@ -34,7 +23,6 @@ router.post('/ordens-uniformes', async (req, res) => {
     !cliente ||
     !usuario_id
   ) {
-    console.warn('⚠️ Falha na validação. Faltam campos obrigatórios.');
     return res.status(400).json({ erro: 'Preencha todos os campos obrigatórios.' });
   }
 
@@ -47,13 +35,20 @@ router.post('/ordens-uniformes', async (req, res) => {
       [numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id]
     );
 
-    console.log('✅ Ordem criada com sucesso:', nova.rows[0]);
     res.status(201).json(nova.rows[0]);
   } catch (err) {
-    console.error('❌ Erro ao criar ordem:', err);
+    // 🔧 Log temporário via resposta (já que o console do Render é inacessível)
     res.status(500).json({
       erro: 'Erro ao criar ordem.',
       detalhes: err.message,
+      dadosRecebidos: {
+        numero_ordem,
+        data_entrada,
+        prazo_entrega,
+        data_entrega,
+        cliente,
+        usuario_id
+      }
     });
   }
 });
@@ -66,7 +61,6 @@ router.get('/ordens-uniformes', async (req, res) => {
     );
     res.json(resultado.rows);
   } catch (err) {
-    console.error('Erro ao listar ordens:', err);
     res.status(500).json({ erro: 'Erro ao buscar ordens.' });
   }
 });
@@ -84,7 +78,6 @@ router.get('/ordens-uniformes/:id', async (req, res) => {
     }
     res.json(resultado.rows[0]);
   } catch (err) {
-    console.error('Erro ao buscar ordem:', err);
     res.status(500).json({ erro: 'Erro ao buscar ordem.' });
   }
 });
@@ -128,7 +121,6 @@ router.put('/ordens-uniformes/:id', async (req, res) => {
 
     res.json(atualizada.rows[0]);
   } catch (err) {
-    console.error('Erro ao atualizar ordem:', err);
     res.status(500).json({ erro: 'Erro ao atualizar ordem.' });
   }
 });
@@ -140,7 +132,6 @@ router.delete('/ordens-uniformes/:id', async (req, res) => {
     await db.query('DELETE FROM ordem_producao_uniformes_dados_ordem WHERE id = $1', [id]);
     res.status(204).send();
   } catch (err) {
-    console.error('Erro ao excluir ordem:', err);
     res.status(500).json({ erro: 'Erro ao excluir ordem.' });
   }
 });
