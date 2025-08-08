@@ -13,6 +13,9 @@ import rotaTamanhosGrade from './routes/tamanhosGrade.js';
 import tamanhosGradeRouter from './routes/tamanhosGrade.js';
 import rotaSetores from './routes/setores.js';
 import loginRoutes from './routes/login.js';
+import ordemProducaoUniformeRouter from './routes/ordemProducaoUniformeRouter.js';
+import ordemProducaoUniformeModelosRouter from './routes/ordemProducaoUniformeModelosRouter.js';
+import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeTamanhosRouter.js';
 
 
 const app = express();
@@ -32,6 +35,9 @@ app.use('/detalhamento-manga', rotaDetalhamentoManga);
 app.use('/grades', rotaGrades);
 app.use('/tamanhos-grade', rotaTamanhosGrade);
 app.use('/tamanhos-grade', tamanhosGradeRouter);
+app.use(ordemProducaoUniformeRouter);
+app.use(ordemProducaoUniformeModelosRouter);
+app.use(ordemProducaoUniformeTamanhosRouter);
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
