@@ -151,5 +151,23 @@ router.get('/ordens-uniformes/usuario/:id', async (req, res) => {
   }
 });
 
+// Buscar todas as ordens de um usuário específico
+router.get('/ordens-uniformes/usuario/:usuario_id', async (req, res) => {
+  const { usuario_id } = req.params;
+
+  try {
+    const resultado = await db.query(
+      'SELECT * FROM ordem_producao_uniformes_dados_ordem WHERE usuario_id = $1 ORDER BY id DESC',
+      [usuario_id]
+    );
+
+    res.json(resultado.rows);
+  } catch (err) {
+    console.error('Erro ao buscar ordens do usuário:', err);
+    res.status(500).json({ erro: 'Erro ao buscar ordens do usuário.' });
+  }
+});
+
+
 
 export default router;
