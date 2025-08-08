@@ -5,26 +5,56 @@ const router = express.Router();
 
 // Criar nova ordem de produção de uniformes
 router.post('/ordens-uniformes', async (req, res) => {
-  console.log('📦 Dados recebidos:', req.body); // 👈 coloca aqui
+  console.log('📦 Dados recebidos no req.body:', req.body);
 
-  const { numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id } = req.body;
+  const {
+    numero_ordem,
+    data_entrada,
+    prazo_entrega,
+    data_entrega,
+    cliente,
+    usuario_id,
+  } = req.body;
 
-  if (!numero_ordem || !data_entrada || !prazo_entrega || !data_entrega || !cliente || !usuario_id) {
+  // Log de cada campo individual
+  console.log('🧪 Campos recebidos individualmente:');
+  console.log('numero_ordem:', numero_ordem);
+  console.log('data_entrada:', data_entrada);
+  console.log('prazo_entrega:', prazo_entrega);
+  console.log('data_entrega:', data_entrega);
+  console.log('cliente:', cliente);
+  console.log('usuario_id:', usuario_id);
+
+  // Validação básica
+  if (
+    !numero_ordem ||
+    !data_entrada ||
+    !prazo_entrega ||
+    !data_entrega ||
+    !cliente ||
+    !usuario_id
+  ) {
+    console.warn('⚠️ Falha na validação. Faltam campos obrigatórios.');
     return res.status(400).json({ erro: 'Preencha todos os campos obrigatórios.' });
   }
 
   try {
     const nova = await db.query(
       `INSERT INTO ordem_producao_uniformes_dados_ordem
-      (numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id)
-      VALUES ($1, $2, $3, $4, $5, 'rascunho', $6)
-      RETURNING *`,
+        (numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id)
+       VALUES ($1, $2, $3, $4, $5, 'rascunho', $6)
+       RETURNING *`,
       [numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, usuario_id]
     );
+
+    console.log('✅ Ordem criada com sucesso:', nova.rows[0]);
     res.status(201).json(nova.rows[0]);
   } catch (err) {
-    console.error('Erro ao criar ordem:', err);
-    res.status(500).json({ erro: 'Erro ao criar ordem.' });
+    console.error('❌ Erro ao criar ordem:', err);
+    res.status(500).json({
+      erro: 'Erro ao criar ordem.',
+      detalhes: err.message,
+    });
   }
 });
 
@@ -62,7 +92,15 @@ router.get('/ordens-uniformes/:id', async (req, res) => {
 // Atualizar ordem (auto salvamento)
 router.put('/ordens-uniformes/:id', async (req, res) => {
   const { id } = req.params;
-  const { numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id } = req.body;
+  const {
+    numero_ordem,
+    data_entrada,
+    prazo_entrega,
+    data_entrega,
+    cliente,
+    status,
+    usuario_id,
+  } = req.body;
 
   try {
     const atualizada = await db.query(
@@ -76,7 +114,16 @@ router.put('/ordens-uniformes/:id', async (req, res) => {
            usuario_id = $7
        WHERE id = $8
        RETURNING *`,
-      [numero_ordem, data_entrada, prazo_entrega, data_entrega, cliente, status, usuario_id, id]
+      [
+        numero_ordem,
+        data_entrada,
+        prazo_entrega,
+        data_entrega,
+        cliente,
+        status,
+        usuario_id,
+        id,
+      ]
     );
 
     res.json(atualizada.rows[0]);
