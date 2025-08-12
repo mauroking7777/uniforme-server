@@ -5,7 +5,7 @@ const router = express.Router();
 
 /**
  * POST /ordens-uniformes/:ordemId/modelos
- * Cadastra um modelo dentro da ordem, incluindo detalhamentos_json (JSONB).
+ * Cadastra um modelo (com detalhamentos_json JSONB).
  */
 router.post('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
   const { ordemId } = req.params;
@@ -21,7 +21,6 @@ router.post('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
     detalhamentos_json = [],
   } = req.body;
 
-  // Validações básicas
   if (!ordemId) return res.status(400).json({ erro: 'ordemId é obrigatório.' });
   if (!modelo_id) return res.status(400).json({ erro: 'modelo_id é obrigatório.' });
   if (!tecido_id) return res.status(400).json({ erro: 'tecido_id é obrigatório.' });
@@ -31,12 +30,11 @@ router.post('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
     return res.status(400).json({ erro: 'referencia_layout é obrigatório.' });
   }
 
-  // Normalizações
   try {
-    modelo_id  = parseInt(modelo_id, 10);
-    tecido_id  = parseInt(tecido_id, 10);
-    gola_id    = parseInt(gola_id, 10);
-    manga_id   = parseInt(manga_id, 10);
+    modelo_id = parseInt(modelo_id, 10);
+    tecido_id = parseInt(tecido_id, 10);
+    gola_id   = parseInt(gola_id, 10);
+    manga_id  = parseInt(manga_id, 10);
     if (detalhe_manga_id !== null && detalhe_manga_id !== undefined && detalhe_manga_id !== '') {
       detalhe_manga_id = parseInt(detalhe_manga_id, 10);
       if (Number.isNaN(detalhe_manga_id)) detalhe_manga_id = null;
@@ -47,7 +45,6 @@ router.post('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
     return res.status(400).json({ erro: 'IDs inválidos (modelo/tecido/gola/manga).' });
   }
 
-  // Garante array JSON válido
   if (!Array.isArray(detalhamentos_json)) {
     try {
       detalhamentos_json = JSON.parse(detalhamentos_json);
@@ -89,18 +86,26 @@ router.post('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
 
 /**
  * GET /ordens-uniformes/:ordemId/modelos
- * Lista os modelos de uma ordem (inclui detalhamentos_json).
+ * Lista modelos da ordem com nomes (JOINs) e detalhamentos_json.
  */
 router.get('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
   const { ordemId } = req.params;
   try {
-    const r = await db.query(
-      `SELECT *
-         FROM ordem_producao_uniformes_dados_modelo
-        WHERE ordem_id = $1
-        ORDER BY id ASC`,
-      [ordemId]
-    );
+    const sql = `
+      SELECT m.*,
+             md.nome  AS modelo_nome,
+             tec.nome AS tecido_nome,
+             g.nome   AS gola_nome,
+             man.nome AS manga_nome
+        FROM ordem_producao_uniformes_dados_modelo m
+   LEFT JOIN modelos    md  ON md.id  = m.modelo_id
+   LEFT JOIN tecidos    tec ON tec.id = m.tecido_id
+   LEFT JOIN tipo_gola  g   ON g.id   = m.gola_id
+   LEFT JOIN tipo_manga man ON man.id = m.manga_id
+       WHERE m.ordem_id = $1
+    ORDER BY m.id ASC;
+    `;
+    const r = await db.query(sql, [ordemId]);
     res.json(r.rows);
   } catch (err) {
     console.error('Erro ao listar modelos:', err);
@@ -110,15 +115,11 @@ router.get('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
 
 /**
  * GET /ordens-uniformes/modelos/:id
- * Busca um modelo específico pelo ID.
  */
 router.get('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const r = await db.query(
-      `SELECT * FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`,
-      [id]
-    );
+    const r = await db.query(`SELECT * FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`, [id]);
     if (r.rows.length === 0) return res.status(404).json({ erro: 'Modelo não encontrado.' });
     res.json(r.rows[0]);
   } catch (err) {
@@ -129,7 +130,6 @@ router.get('/ordens-uniformes/modelos/:id', async (req, res) => {
 
 /**
  * PUT /ordens-uniformes/modelos/:id
- * Atualiza um modelo da ordem (inclui detalhamentos_json).
  */
 router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
@@ -186,7 +186,7 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
              informacoes_adicionais = $8,
              detalhamentos_json = $9::jsonb
        WHERE id = $10
-       RETURNING *;
+   RETURNING *;
     `;
     const params = [
       modelo_id ?? null,
@@ -212,15 +212,11 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
 
 /**
  * DELETE /ordens-uniformes/modelos/:id
- * Exclui um modelo da ordem.
  */
 router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const r = await db.query(
-      'DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
-      [id]
-    );
+    const r = await db.query('DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1', [id]);
     if (r.rowCount === 0) return res.status(404).json({ erro: 'Modelo não encontrado.' });
     res.status(204).send();
   } catch (err) {
