@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import db from '../db.js';
 
 const router = express.Router();
-const JWT_SECRET = 'uniforme-secret-key'; // 🔐 Em breve podemos mover isso para .env
+const JWT_SECRET = process.env.JWT_SECRET || 'uniforme-secret-key';
 
 // Rota de login
 router.post('/login', async (req, res) => {
