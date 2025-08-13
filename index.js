@@ -16,6 +16,8 @@ import loginRoutes from './routes/login.js';
 import ordemProducaoUniformeRouter from './routes/ordemProducaoUniformeRouter.js';
 import ordemProducaoUniformeModelosRouter from './routes/ordemProducaoUniformeModelosRouter.js';
 import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeTamanhosRouter.js';
+import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
+
 
 
 const app = express();
@@ -38,6 +40,8 @@ app.use('/tamanhos-grade', tamanhosGradeRouter);
 app.use(ordemProducaoUniformeRouter);
 app.use(ordemProducaoUniformeModelosRouter);
 app.use(ordemProducaoUniformeTamanhosRouter);
+app.use(ordemItemArquivoRouter);
+
 
 // Rota raiz para verificação do servidor
 app.get('/', (req, res) => {
