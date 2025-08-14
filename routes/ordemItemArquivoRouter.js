@@ -3,9 +3,50 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import db from '../db.js';
-
 import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import path from 'node:path';
+import multer from 'multer';
+
+
+// limite de tamanho (MB) vindo do Render (ex.: 256)
+const MAX_MB = parseInt(process.env.CDR_MAX_MB || '200', 10);
+
+// multer em memória (não grava em disco)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_MB * 1024 * 1024 },
+});
+
+// cliente S3 apontando pro Cloudflare R2
+const r2 = new S3Client({
+  region: 'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
+
+// helpers
+function sanitizeFileName(name) {
+  return String(name)
+    .normalize('NFKD')
+    .replace(/[^\w.\-]+/g, '_')
+    .slice(0, 140);
+}
+
+function getUserIdFromAuth(req) {
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET || 'uniforme-secret-key');
+    return payload?.id ?? payload?.userId ?? null;
+  } catch {
+    return null;
+  }
+}
 
 
 
@@ -194,5 +235,66 @@ router.post('/ordens/:ordemId/itens/:itemId/cdr/download-url', requireAuth, asyn
     return res.status(500).json({ erro: 'Falha ao gerar URL de download.' });
   }
 });
+
+// POST /ordens/:ordemId/itens/:itemId/cdr/upload
+// recebe o arquivo "file" do front, envia ao R2 e grava no Postgres
+router.post('/:ordemId/itens/:itemId/cdr/upload', upload.single('file'), async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+
+    // precisa estar autenticado (usamos o mesmo JWT do login)
+    const userId = getUserIdFromAuth(req);
+    if (!userId) {
+      return res.status(401).json({ error: 'Não autenticado.' });
+    }
+
+    // arquivo obrigatório
+    if (!req.file) {
+      return res.status(400).json({ error: 'Arquivo (.cdr) é obrigatório (campo "file").' });
+    }
+
+    // só .cdr
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    if (ext !== '.cdr') {
+      return res.status(400).json({ error: 'Apenas arquivos .cdr são aceitos.' });
+    }
+
+    // gera uma key bonita
+    const base = sanitizeFileName(path.basename(req.file.originalname, ext));
+    const key = `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${base}${ext}`;
+
+    // sobe pro R2
+    await r2.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype || 'application/octet-stream',
+      ContentLength: req.file.size,
+    }));
+
+    // grava no Postgres
+    const insertSql = `
+      INSERT INTO ordem_item_arquivo
+        (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+      VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+      RETURNING id, key, nome_original, content_type, tamanho_bytes, status, created_at;
+    `;
+    const { rows } = await db.query(insertSql, [
+      ordemId,
+      itemId,
+      key,
+      req.file.originalname,
+      req.file.mimetype || 'application/octet-stream',
+      req.file.size,
+      userId,
+    ]);
+
+    return res.json({ ok: true, arquivo: rows[0] });
+  } catch (err) {
+    console.error('Erro no upload .cdr:', err);
+    return res.status(500).json({ error: 'Falha ao enviar arquivo para o R2.' });
+  }
+});
+
 
 export default router;
