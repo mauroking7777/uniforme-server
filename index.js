@@ -1,6 +1,9 @@
+// index.js
 import express from 'express';
 import cors from 'cors';
 import pool from './db.js';
+
+// Cadastros / catálogo
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
 import rotaModelos from './routes/modelos.js';
@@ -10,22 +13,30 @@ import rotaTipoManga from './routes/tipoManga.js';
 import rotaDetalhamentoManga from './routes/detalhamentoManga.js';
 import rotaGrades from './routes/grades.js';
 import rotaTamanhosGrade from './routes/tamanhosGrade.js';
-import tamanhosGradeRouter from './routes/tamanhosGrade.js';
+// ⚠️ REMOVIDO o import duplicado:  import tamanhosGradeRouter from './routes/tamanhosGrade.js';
 import rotaSetores from './routes/setores.js';
+
+// Auth / login
 import loginRoutes from './routes/login.js';
+
+// Ordens de produção (uniformes)
 import ordemProducaoUniformeRouter from './routes/ordemProducaoUniformeRouter.js';
 import ordemProducaoUniformeModelosRouter from './routes/ordemProducaoUniformeModelosRouter.js';
 import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeTamanhosRouter.js';
+
+// Upload de arquivos dos itens da ordem (CDR)
 import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
-
-
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Auth / base
 app.use('/', loginRoutes);
+
+// Cadastros
 app.use('/usuarios', rotaUsuarios);
 app.use('/setores', rotaSetores);
 app.use('/funcoes', rotaFuncoes);
@@ -35,20 +46,26 @@ app.use('/tipo-gola', rotaTipoGola);
 app.use('/tipo-manga', rotaTipoManga);
 app.use('/detalhamento-manga', rotaDetalhamentoManga);
 app.use('/grades', rotaGrades);
+
+// Tamanhos da grade (MONTAR APENAS UMA VEZ)
 app.use('/tamanhos-grade', rotaTamanhosGrade);
-app.use('/tamanhos-grade', tamanhosGradeRouter);
+
+// Ordens (uniformes)
 app.use(ordemProducaoUniformeRouter);
 app.use(ordemProducaoUniformeModelosRouter);
 app.use(ordemProducaoUniformeTamanhosRouter);
-app.use(ordemItemArquivoRouter);
 
+// 🔴 PULO DO GATO: prefixo /ordens para casar com o front
+// O arquivo routes/ordemItemArquivoRouter.js deve declarar rotas RELATIVAS, tipo:
+// router.post('/:ordemId/itens/:itemId/cdr/upload', upload.single('file'), handler)
+app.use('/ordens', ordemItemArquivoRouter);
 
-// Rota raiz para verificação do servidor
+// Saúde
 app.get('/', (req, res) => {
   res.send('Servidor Uniforme.com está rodando! 🚀');
 });
 
-// Rota de teste para verificar conexão com o banco
+// Diagnóstico opcional (você já tinha)
 app.get('/test-db', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
@@ -59,7 +76,7 @@ app.get('/test-db', async (req, res) => {
   }
 });
 
-// Rota opcional para criação da tabela usuarios (pode ser mantida para emergências)
+// Rota opcional de criação de tabela (mantenha só se precisar mesmo)
 app.get('/criar-tabela', async (req, res) => {
   try {
     const sql = `
@@ -86,9 +103,10 @@ app.get('/criar-tabela', async (req, res) => {
   }
 });
 
+// Se essa rota já estiver dentro do router de tamanhosGrade, remova daqui.
+// Mantive para não quebrar seu fluxo atual.
 app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
   const { grade_id } = req.params;
-
   try {
     const resultado = await pool.query(
       'SELECT id, tamanho, ordem_exibicao FROM tamanhos_grade WHERE grade_id = $1 ORDER BY ordem_exibicao ASC',
@@ -101,10 +119,6 @@ app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
   }
 });
 
-
-
-
-// Inicializa servidor
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
