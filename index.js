@@ -26,12 +26,15 @@ import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeT
 
 // Upload de arquivos dos itens da ordem (CDR)
 import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
+import extractListRouter from './routes/extractListRouter.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json());
+// limite de 5mb para payload JSON (seguro para respostas do GPT)
+app.use(express.json({ limit: '5mb' }));
+
 
 // Auth / base
 app.use('/', loginRoutes);
@@ -46,6 +49,7 @@ app.use('/tipo-gola', rotaTipoGola);
 app.use('/tipo-manga', rotaTipoManga);
 app.use('/detalhamento-manga', rotaDetalhamentoManga);
 app.use('/grades', rotaGrades);
+app.use('/extract-list', extractListRouter);
 
 // Tamanhos da grade (MONTAR APENAS UMA VEZ)
 app.use('/tamanhos-grade', rotaTamanhosGrade);
