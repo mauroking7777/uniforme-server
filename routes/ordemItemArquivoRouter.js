@@ -82,13 +82,20 @@ function sanitizeFileName(name) {
 
 function onlyCDR(nome, contentType) {
   const okExt = String(nome || '').toLowerCase().endsWith('.cdr');
-  const type = (String(contentType || '') || 'application/octet-stream').toLowerCase();
-  const okType =
-    type === 'application/x-coreldraw' ||
-    type === 'image/x-coreldraw' ||
-    type === 'application/octet-stream';
-  return okExt && okType;
+  // aceita vários tipos comuns; se vier vazio, também deixa passar
+  const type = String(contentType || '').toLowerCase();
+  const allowed = new Set([
+    'application/x-coreldraw',
+    'image/x-coreldraw',
+    'application/vnd.corel-draw',
+    'application/cdr',
+    'image/cdr',
+    '', // alguns browsers mandam vazio
+    'application/octet-stream',
+  ]);
+  return okExt && allowed.has(type);
 }
+
 
 function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName(originalName.replace(/\.cdr$/i, ''));
