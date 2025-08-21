@@ -19,13 +19,13 @@ const router = express.Router();
  * ENV / CONFIG
  * ========================= */
 const {
-  R2_ENDPOINT,               // ex: https://<account>.r2.cloudflarestorage.com (recomendado)
-  R2_ACCOUNT_ID,             // alternativo, se não usar R2_ENDPOINT
+  R2_ENDPOINT,               // ex: https://<account>.r2.cloudflarestorage.com
+  R2_ACCOUNT_ID,
   R2_ACCESS_KEY_ID,
   R2_SECRET_ACCESS_KEY,
   R2_BUCKET,
   JWT_SECRET = 'uniforme-secret-key',
-  CDR_MAX_MB = '256',        // limite (MB) também usado no multer
+  CDR_MAX_MB = '256',
 } = process.env;
 
 const CDR_MAX_BYTES = parseInt(CDR_MAX_MB, 10) * 1024 * 1024;
@@ -33,12 +33,8 @@ const endpoint =
   R2_ENDPOINT ||
   (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
 
-if (!endpoint) {
-  console.warn('[ordemItemArquivoRouter] R2 endpoint não configurado. Defina R2_ENDPOINT ou R2_ACCOUNT_ID.');
-}
-if (!R2_BUCKET) {
-  console.warn('[ordemItemArquivoRouter] R2_BUCKET não definido.');
-}
+if (!endpoint) console.warn('[ordemItemArquivoRouter] R2 endpoint não configurado.');
+if (!R2_BUCKET) console.warn('[ordemItemArquivoRouter] R2_BUCKET não definido.');
 
 /* =========================
  * S3 / R2 CLIENT
@@ -99,6 +95,12 @@ function buildKey(ordemId, itemId, originalName) {
   return `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${crypto.randomUUID()}_${base}.cdr`;
 }
 
+// ➕ key p/ JSON da lista
+function buildListKey(ordemId, itemId, nomeBase = 'lista-nomes.json') {
+  const base = sanitizeFileName(nomeBase.replace(/\.json$/i, ''));
+  return `ordens/${ordemId}/itens/${itemId}/listas/${Date.now()}_${crypto.randomUUID()}_${base}.json`;
+}
+
 async function assertItemDaOrdem(ordemId, itemId) {
   const q = await db.query(
     'SELECT 1 FROM ordem_producao_uniformes_dados_modelo WHERE id = $1 AND ordem_id = $2 LIMIT 1',
@@ -108,7 +110,7 @@ async function assertItemDaOrdem(ordemId, itemId) {
 }
 
 /* =========================================================
- * 1) UPLOAD DIRETO (multipart/form-data, campo "file")
+ * 1) UPLOAD DIRETO do CDR
  *    POST  /ordens/:ordemId/itens/:itemId/cdr/upload
  * ========================================================= */
 router.post(
@@ -119,7 +121,6 @@ router.post(
     try {
       const { ordemId, itemId } = req.params;
 
-      // Checa se o item realmente pertence à ordem
       if (!(await assertItemDaOrdem(ordemId, itemId))) {
         return res.status(400).json({ error: 'Item não pertence à ordem informada.' });
       }
@@ -145,15 +146,14 @@ router.post(
         })
       );
 
-      // Soft-delete de arquivos ativos anteriores deste item
+      // ⚠️ Soft-delete APENAS dos CDRs anteriores (não apaga listas!)
       await db.query(
         `UPDATE ordem_item_arquivo
            SET deleted_at = NOW()
-         WHERE item_id = $1 AND deleted_at IS NULL`,
+         WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
         [itemId]
       );
 
-      // Insere o novo registro "uploaded"
       const insertSql = `
         INSERT INTO ordem_item_arquivo
           (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
@@ -182,8 +182,80 @@ router.post(
 );
 
 /* =========================================================
- * 2) LISTAR ARQUIVOS DO ITEM
- *    GET   /ordens/:ordemId/itens/:itemId/cdr/list
+ * 1b) UPLOAD/ATUALIZA a LISTA DE NOMES (JSON)
+ *     POST /ordens/:ordemId/itens/:itemId/lista-nomes
+ *     Body: { lista: [...], modelo_codigo?: "BA37OK" }
+ * ========================================================= */
+router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { lista, modelo_codigo } = req.body || {};
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!Array.isArray(lista) || lista.length === 0) {
+      return res.status(400).json({ erro: 'Campo "lista" precisa ser um array não vazio.' });
+    }
+
+    // monta payload final (mantém espaço p/ evoluir o formato)
+    const payload = {
+      modelo_codigo: modelo_codigo || null,
+      gerado_em: new Date().toISOString(),
+      itens: lista.map((r) => ({
+        nome: (r?.nome || '').trim(),
+        numero: r?.numero ? String(r.numero).trim() : null,
+        tamanho: r?.tamanho ? String(r.tamanho).trim() : null,
+      })),
+    };
+
+    const bodyStr = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
+    const key = buildListKey(ordemId, itemId);
+
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        Body: bodyStr,
+        ContentType: 'application/json; charset=utf-8',
+        ContentLength: bodyStr.length,
+      })
+    );
+
+    // ⚠️ Soft-delete apenas das LISTAS anteriores
+    await db.query(
+      `UPDATE ordem_item_arquivo
+         SET deleted_at = NOW()
+       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/listas/%'`,
+      [itemId]
+    );
+
+    const { rows } = await db.query(
+      `INSERT INTO ordem_item_arquivo
+         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+       RETURNING id, key, created_at`,
+      [
+        ordemId,
+        itemId,
+        key,
+        'lista-nomes.json',
+        'application/json',
+        bodyStr.length,
+        req.user?.id || null,
+      ]
+    );
+
+    return res.json({ ok: true, arquivo: rows[0] });
+  } catch (e) {
+    console.error('upload lista-nomes erro:', e);
+    return res.status(500).json({ erro: 'Falha ao salvar a lista de nomes.' });
+  }
+});
+
+/* =========================================================
+ * 2) LISTAR ARQUIVOS ATIVOS DO ITEM (CDR + JSON)
+ *     GET /ordens/:ordemId/itens/:itemId/cdr/list
  * ========================================================= */
 router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => {
   try {
@@ -212,8 +284,8 @@ router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => 
 });
 
 /* =========================================================
- * 3a) DOWNLOAD URL DO ÚLTIMO ARQUIVO ATIVO DO ITEM
- *     GET   /ordens/:ordemId/itens/:itemId/cdr/download-url
+ * 3a) URL do CDR mais recente
+ *     GET /ordens/:ordemId/itens/:itemId/cdr/download-url
  * ========================================================= */
 router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, res) => {
   try {
@@ -230,6 +302,7 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
           AND item_id  = $2
           AND deleted_at IS NULL
           AND status = 'uploaded'
+          AND key LIKE '%/corel/%'
         ORDER BY created_at DESC
         LIMIT 1`,
       [ordemId, itemId]
@@ -248,7 +321,7 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
         ResponseContentType: content_type || 'application/octet-stream',
         ResponseContentDisposition: `attachment; filename="${encodeURIComponent(nome_original)}"`,
       }),
-      { expiresIn: 60 * 10 } // 10 min
+      { expiresIn: 60 * 10 }
     );
 
     return res.json({ url, expiresInSec: 600 });
@@ -259,8 +332,56 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
 });
 
 /* =========================================================
- * 3b) DOWNLOAD URL POR ID DO ARQUIVO
- *     GET   /ordens/arquivos/:arquivoId/url
+ * 3c) URL da LISTA DE NOMES (JSON) mais recente
+ *     GET /ordens/:ordemId/itens/:itemId/lista-nomes/url
+ * ========================================================= */
+router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+
+    const q = await db.query(
+      `SELECT id, key, nome_original
+         FROM ordem_item_arquivo
+        WHERE ordem_id = $1
+          AND item_id  = $2
+          AND deleted_at IS NULL
+          AND status = 'uploaded'
+          AND key LIKE '%/listas/%'
+        ORDER BY created_at DESC
+        LIMIT 1`,
+      [ordemId, itemId]
+    );
+
+    if (q.rowCount === 0) {
+      return res.status(404).json({ erro: 'Nenhuma lista de nomes ativa para este item.' });
+    }
+
+    const { key, nome_original } = q.rows[0];
+    const url = await getSignedUrl(
+      s3,
+      new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        ResponseContentType: 'application/json; charset=utf-8',
+        ResponseContentDisposition: `attachment; filename="${encodeURIComponent(nome_original)}"`,
+      }),
+      { expiresIn: 60 * 10 }
+    );
+
+    return res.json({ url, expiresInSec: 600 });
+  } catch (e) {
+    console.error('lista-nomes url erro:', e);
+    res.status(500).json({ erro: 'Falha ao gerar URL da lista de nomes.' });
+  }
+});
+
+/* =========================================================
+ * 3b) URL por ID (genérica – serve p/ CDR e JSON)
+ *     GET /ordens/arquivos/:arquivoId/url
  * ========================================================= */
 router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
   try {
@@ -293,8 +414,7 @@ router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
 });
 
 /* =========================================================
- * 4) (OPCIONAL) EXCLUIR ARQUIVO (R2 + soft-delete)
- *     DELETE /ordens/arquivos/:arquivoId
+ * 4) DELETE (genérico)
  * ========================================================= */
 router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
   const client = await db.connect();
@@ -309,14 +429,12 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 
     const key = rows[0].key;
 
-    // remove do R2 (se existir)
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
     } catch (e) {
       console.warn('Falha ao remover do R2 (seguindo com soft-delete):', e?.message);
     }
 
-    // soft-delete no banco
     await client.query('UPDATE ordem_item_arquivo SET deleted_at = NOW() WHERE id = $1', [arquivoId]);
 
     res.json({ ok: true });
@@ -329,14 +447,8 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 });
 
 /* =========================================================
- * (Opcional) Fluxo PRESIGNED PUT (se quiser manter)
- *  POST /:ordemId/itens/:itemId/cdr/upload-url   -> retorna URL de PUT
- *  POST /:ordemId/itens/:itemId/cdr/confirm      -> grava no banco
- *  (Você está usando upload direto no front. Esses endpoints ficam
- *   disponíveis só se decidir voltar para presigned PUT.)
+ * (Opcional) Presigned PUT (mantido)
  * ========================================================= */
-
-// Gera URL pré-assinada para PUT
 router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
@@ -362,7 +474,7 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
       ContentType: content_type,
       ContentLength: Number(tamanho_bytes),
     });
-    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 15 * 60 }); // 15 min
+    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 15 * 60 });
 
     return res.json({ objectKey: Key, uploadUrl, expiresInSec: 900 });
   } catch (e) {
@@ -371,7 +483,6 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
   }
 });
 
-// Confirma o upload (grava no banco)
 router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
   const client = await db.connect();
   try {
@@ -398,15 +509,13 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
 
     await client.query('BEGIN');
 
-    // Soft-delete do ativo anterior (se existir)
     await client.query(
       `UPDATE ordem_item_arquivo
          SET deleted_at = NOW()
-       WHERE item_id = $1 AND deleted_at IS NULL`,
+       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
       [itemId]
     );
 
-    // Insere novo registro ativo
     const ins = await client.query(
       `INSERT INTO ordem_item_arquivo
          (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
