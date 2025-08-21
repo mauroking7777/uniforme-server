@@ -101,6 +101,11 @@ function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName(originalName.replace(/\.cdr$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${crypto.randomUUID()}_${base}.cdr`;
 }
+// salva JSON de lista em: ordens/:ordemId/itens/:itemId/listas/<ts_uuid>_lista-nomes.json
+function buildListaKey(ordemId, itemId) {
+  return `ordens/${ordemId}/itens/${itemId}/listas/${Date.now()}_${crypto.randomUUID()}_lista-nomes.json`;
+}
+
 
 // ➕ key p/ JSON da lista
 function buildListKey(ordemId, itemId, nomeBase = 'lista-nomes.json') {
@@ -120,73 +125,144 @@ async function assertItemDaOrdem(ordemId, itemId) {
  * 1) UPLOAD DIRETO do CDR
  *    POST  /ordens/:ordemId/itens/:itemId/cdr/upload
  * ========================================================= */
+// Agora aceitando dois campos de multipart:
+// - file         (obrigatório) -> .cdr
+// - lista_nomes  (opcional)    -> application/json  (conteúdo do JSON gerado no front)
 router.post(
   '/:ordemId/itens/:itemId/cdr/upload',
   requireAuth,
-  upload.single('file'),
+  upload.fields([{ name: 'file', maxCount: 1 }, { name: 'lista_nomes', maxCount: 1 }]),
   async (req, res) => {
     try {
       const { ordemId, itemId } = req.params;
 
+      // confere vínculo item-ordem
       if (!(await assertItemDaOrdem(ordemId, itemId))) {
         return res.status(400).json({ error: 'Item não pertence à ordem informada.' });
       }
 
-      if (!req.file) {
+      // ---- arquivo CDR (obrigatório)
+      const fileArr = req.files?.file || [];
+      const cdr = fileArr[0];
+
+      if (!cdr) {
         return res.status(400).json({ error: 'Arquivo (.cdr) é obrigatório (campo "file").' });
       }
 
-      const ext = path.extname(req.file.originalname || '').toLowerCase();
-      if (ext !== '.cdr' || !onlyCDR(req.file.originalname, req.file.mimetype)) {
+      const ext = path.extname(cdr.originalname || '').toLowerCase();
+      if (ext !== '.cdr' || !onlyCDR(cdr.originalname, cdr.mimetype)) {
         return res.status(415).json({ error: 'Apenas arquivos .cdr são aceitos.' });
       }
 
-      const key = buildKey(ordemId, itemId, req.file.originalname);
+      // ---- lista (opcional)
+      const listaArr = req.files?.lista_nomes || [];
+      const lista = listaArr[0]; // pode ser undefined
 
+      // subimos primeiro o CDR
+      const keyCdr = buildKey(ordemId, itemId, cdr.originalname);
       await s3.send(
         new PutObjectCommand({
           Bucket: R2_BUCKET,
-          Key: key,
-          Body: req.file.buffer,
-          ContentType: req.file.mimetype || 'application/octet-stream',
-          ContentLength: req.file.size,
+          Key: keyCdr,
+          Body: cdr.buffer,
+          ContentType: cdr.mimetype || 'application/octet-stream',
+          ContentLength: cdr.size,
         })
       );
 
-      // ⚠️ Soft-delete APENAS dos CDRs anteriores (não apaga listas!)
+      // soft-delete de CDRs ativos anteriores
       await db.query(
         `UPDATE ordem_item_arquivo
            SET deleted_at = NOW()
-         WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
+         WHERE item_id = $1
+           AND deleted_at IS NULL
+           AND content_type <> 'application/json'`,
         [itemId]
       );
 
-      const insertSql = `
-        INSERT INTO ordem_item_arquivo
+      // grava o registro do CDR
+      const insCdr = await db.query(
+        `INSERT INTO ordem_item_arquivo
           (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
-        VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
-        RETURNING id, ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_at;
-      `;
-      const { rows } = await db.query(insertSql, [
-        ordemId,
-        itemId,
-        key,
-        req.file.originalname,
-        req.file.mimetype || 'application/octet-stream',
-        req.file.size,
-        req.user?.id || null,
-      ]);
+         VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+         RETURNING id`,
+        [
+          ordemId,
+          itemId,
+          keyCdr,
+          cdr.originalname,
+          cdr.mimetype || 'application/octet-stream',
+          cdr.size,
+          req.user?.id || null,
+        ]
+      );
 
-      return res.json({ ok: true, arquivo: rows[0] });
+      let listaSaved = null;
+
+      if (lista) {
+        // valida tipo (aceitamos application/json ou octet-stream vindo do browser)
+        const ct = (lista.mimetype || '').toLowerCase();
+        if (ct && !/json|octet-stream/.test(ct)) {
+          return res.status(415).json({ error: 'Lista deve ser JSON.' });
+        }
+
+        const keyLista = buildListaKey(ordemId, itemId);
+
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: keyLista,
+            Body: lista.buffer,
+            ContentType: 'application/json',
+            ContentLength: lista.size,
+          })
+        );
+
+        // soft-delete de listas anteriores (somente content_type json)
+        await db.query(
+          `UPDATE ordem_item_arquivo
+             SET deleted_at = NOW()
+           WHERE item_id = $1
+             AND deleted_at IS NULL
+             AND content_type = 'application/json'`,
+          [itemId]
+        );
+
+        // grava o registro da lista
+        const insLista = await db.query(
+          `INSERT INTO ordem_item_arquivo
+            (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+           RETURNING id`,
+          [
+            ordemId,
+            itemId,
+            keyLista,
+            'lista-nomes.json',
+            'application/json',
+            lista.size,
+            req.user?.id || null,
+          ]
+        );
+
+        listaSaved = { id: insLista.rows[0].id, key: keyLista };
+      }
+
+      return res.json({
+        ok: true,
+        cdr: { id: insCdr.rows[0].id, key: keyCdr },
+        lista: listaSaved,
+      });
     } catch (e) {
-      console.error('Erro no upload .cdr:', e);
+      console.error('upload CDR+lista erro:', e);
       if (e?.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
       }
-      return res.status(500).json({ error: 'Falha ao enviar arquivo para o R2.' });
+      return res.status(500).json({ error: 'Falha ao enviar arquivos para o R2.' });
     }
   }
 );
+
 
 /* =========================================================
  * 1b) UPLOAD/ATUALIZA a LISTA DE NOMES (JSON)
