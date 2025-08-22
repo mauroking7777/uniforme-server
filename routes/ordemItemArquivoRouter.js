@@ -6,7 +6,7 @@ import multer from 'multer';
 
 import db from '../db.js';
 import { auth as requireAuth } from './auth.js';
-import { r2 } from '../r2Client.js';
+import { r2 } from './r2Client.js'
 
 import {
   PutObjectCommand,
