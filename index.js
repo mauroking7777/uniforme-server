@@ -30,6 +30,8 @@ import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeT
 import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
 import extractListRouter from './routes/extractListRouter.js';
 
+import ordemSetoresRouter from './routes/ordemProducaoUniformeSetoresRouter.js';
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -65,6 +67,7 @@ app.use(ordemProducaoUniformeTamanhosRouter);
 // O arquivo routes/ordemItemArquivoRouter.js deve declarar rotas RELATIVAS, tipo:
 // router.post('/:ordemId/itens/:itemId/cdr/upload', upload.single('file'), handler)
 app.use('/ordens', ordemItemArquivoRouter);
+app.use('/', ordemSetoresRouter);
 
 // Saúde
 app.get('/', (req, res) => {
@@ -124,6 +127,8 @@ app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
     res.status(500).json({ erro: 'Erro ao buscar tamanhos da grade' });
   }
 });
+
+
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
