@@ -254,12 +254,18 @@ router.post(
         lista: listaSaved,
       });
     } catch (e) {
-      console.error('upload CDR+lista erro:', e);
+      console.error('Erro no upload .cdr:', e);
       if (e?.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
       }
-      return res.status(500).json({ error: 'Falha ao enviar arquivos para o R2.' });
+      // expõe detalhes para debug
+      return res.status(500).json({
+        error: 'Falha ao concluir upload/registro do CDR.',
+        detail: e?.message || String(e),
+        pgcode: e?.code || null
+      });
     }
+    
   }
 );
 

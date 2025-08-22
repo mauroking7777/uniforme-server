@@ -2,6 +2,8 @@
 import express from 'express';
 import cors from 'cors';
 import pool from './db.js';
+import 'dotenv/config';
+
 
 // Cadastros / catálogo
 import rotaUsuarios from './routes/usuarios.js';
