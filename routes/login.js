@@ -14,46 +14,53 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const result = await db.query('SELECT * FROM usuarios WHERE email = $1', [email]);
-  
+    const result = await db.query('SELECT * FROM public.usuarios WHERE email = $1', [email]);
+
     if (result.rows.length === 0) {
       return res.status(401).json({ erro: 'Email ou senha inválidos.' });
     }
-  
+
     const usuario = result.rows[0];
-  
+
     if (usuario.senha !== senha) {
       return res.status(401).json({ erro: 'Email ou senha inválidos.' });
     }
-  
-    // 🔍 Buscar acessos do usuário
+
+    // Buscar acessos do usuário (somente setores ativos; traz slug também)
     const acessosQuery = await db.query(
-      `SELECT s.nome FROM acessos_usuario au
-       JOIN setores s ON s.id = au.setor_id
-       WHERE au.usuario_id = $1`,
+      `
+      SELECT s.id, s.slug, s.nome
+      FROM public.acessos_usuario au
+      JOIN public.setores s ON s.id = au.setor_id
+      WHERE au.usuario_id = $1
+        AND s.ativo = TRUE
+      ORDER BY s.ordem_exibicao NULLS LAST, s.nome ASC
+      `,
       [usuario.id]
     );
-  
-    const acessos = acessosQuery.rows.map(a => a.nome);
-  
-    // 🔒 Gera token com os dados do usuário
+
+    const acessos       = acessosQuery.rows.map(a => a.nome); // compatível com o front atual
+    const acessos_slugs = acessosQuery.rows.map(a => a.slug); // para migração futura
+    const acessos_ids   = acessosQuery.rows.map(a => a.id);
+
+    // Gera token com expiração 23:59 do dia
     const agora = new Date();
     const expiracao = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate(), 23, 59, 0);
     const tempoExpiracaoSegundos = Math.floor((expiracao - agora) / 1000);
-  
+
     const token = jwt.sign(
       {
         id: usuario.id,
         nome: usuario.nome,
         email: usuario.email,
         funcao: usuario.funcao,
-        acessos, // inclui os acessos no token se quiser
+        acessos,       // mantém compatível
+        acessos_slugs, // extra
       },
       JWT_SECRET,
       { expiresIn: tempoExpiracaoSegundos }
     );
-  
-    // 🧾 Resposta com acessos incluídos
+
     res.json({
       token,
       usuario: {
@@ -61,14 +68,15 @@ router.post('/login', async (req, res) => {
         nome: usuario.nome,
         funcao: usuario.funcao,
         email: usuario.email,
-        acessos, // <-- lista com nomes dos setores
+        acessos,        // nomes (ex.: "Impressão")
+        acessos_slugs,  // slugs (ex.: "impressao")
+        acessos_ids,    // ids numéricos
       },
     });
   } catch (err) {
     console.error('Erro ao realizar login:', err);
     res.status(500).json({ erro: 'Erro interno no servidor.' });
   }
-  
 });
 
 export default router;

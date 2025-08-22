@@ -1,12 +1,14 @@
 // routes/ordemItemArquivoRouter.js
 import express from 'express';
-import jwt from 'jsonwebtoken';
-import crypto from 'crypto';
 import path from 'node:path';
+import crypto from 'crypto';
 import multer from 'multer';
+
 import db from '../db.js';
+import { auth as requireAuth } from '../auth.js';
+import { r2 } from '../r2Client.js';
+
 import {
-  S3Client,
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
@@ -19,50 +21,14 @@ const router = express.Router();
  * ENV / CONFIG
  * ========================= */
 const {
-  R2_ENDPOINT,               // ex: https://<account>.r2.cloudflarestorage.com
-  R2_ACCOUNT_ID,
-  R2_ACCESS_KEY_ID,
-  R2_SECRET_ACCESS_KEY,
   R2_BUCKET,
-  JWT_SECRET = 'uniforme-secret-key',
   CDR_MAX_MB = '256',
 } = process.env;
 
 const CDR_MAX_BYTES = parseInt(CDR_MAX_MB, 10) * 1024 * 1024;
-const endpoint =
-  R2_ENDPOINT ||
-  (R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : undefined);
 
-if (!endpoint) console.warn('[ordemItemArquivoRouter] R2 endpoint não configurado.');
-if (!R2_BUCKET) console.warn('[ordemItemArquivoRouter] R2_BUCKET não definido.');
-
-/* =========================
- * S3 / R2 CLIENT
- * ========================= */
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-  forcePathStyle: true,
-});
-
-/* =========================
- * AUTH MIDDLEWARE
- * ========================= */
-function requireAuth(req, res, next) {
-  const h = req.headers.authorization || '';
-  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
-  if (!token) return res.status(401).json({ erro: 'Sem token' });
-  try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
-    return next();
-  } catch {
-    return res.status(401).json({ erro: 'Token inválido/expirado' });
-  }
+if (!R2_BUCKET) {
+  console.warn('[ordemItemArquivoRouter] R2_BUCKET não definido.');
 }
 
 /* =========================
@@ -82,7 +48,6 @@ function sanitizeFileName(name) {
 
 function onlyCDR(nome, contentType) {
   const okExt = String(nome || '').toLowerCase().endsWith('.cdr');
-  // aceita vários tipos comuns; se vier vazio, também deixa passar
   const type = String(contentType || '').toLowerCase();
   const allowed = new Set([
     'application/x-coreldraw',
@@ -96,18 +61,13 @@ function onlyCDR(nome, contentType) {
   return okExt && allowed.has(type);
 }
 
-
+// ➕ key p/ CDR
 function buildKey(ordemId, itemId, originalName) {
-  const base = sanitizeFileName(originalName.replace(/\.cdr$/i, ''));
+  const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${crypto.randomUUID()}_${base}.cdr`;
 }
-// salva JSON de lista em: ordens/:ordemId/itens/:itemId/listas/<ts_uuid>_lista-nomes.json
-function buildListaKey(ordemId, itemId) {
-  return `ordens/${ordemId}/itens/${itemId}/listas/${Date.now()}_${crypto.randomUUID()}_lista-nomes.json`;
-}
 
-
-// ➕ key p/ JSON da lista
+// ➕ key p/ JSON (lista de nomes)
 function buildListKey(ordemId, itemId, nomeBase = 'lista-nomes.json') {
   const base = sanitizeFileName(nomeBase.replace(/\.json$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/listas/${Date.now()}_${crypto.randomUUID()}_${base}.json`;
@@ -122,12 +82,12 @@ async function assertItemDaOrdem(ordemId, itemId) {
 }
 
 /* =========================================================
- * 1) UPLOAD DIRETO do CDR
- *    POST  /ordens/:ordemId/itens/:itemId/cdr/upload
+ * 1) UPLOAD DIRETO do CDR (+ lista JSON opcional)
+ *     POST  /ordens/:ordemId/itens/:itemId/cdr/upload
+ *     multipart/form-data:
+ *       - file (obrigatório) -> .cdr
+ *       - lista_nomes (opcional) -> application/json
  * ========================================================= */
-// Agora aceitando dois campos de multipart:
-// - file         (obrigatório) -> .cdr
-// - lista_nomes  (opcional)    -> application/json  (conteúdo do JSON gerado no front)
 router.post(
   '/:ordemId/itens/:itemId/cdr/upload',
   requireAuth,
@@ -136,104 +96,86 @@ router.post(
     try {
       const { ordemId, itemId } = req.params;
 
-      // confere vínculo item-ordem
       if (!(await assertItemDaOrdem(ordemId, itemId))) {
         return res.status(400).json({ error: 'Item não pertence à ordem informada.' });
       }
 
-      // ---- arquivo CDR (obrigatório)
-      const fileArr = req.files?.file || [];
-      const cdr = fileArr[0];
-
+      // ---- CDR (obrigatório)
+      const cdr = (req.files?.file || [])[0];
       if (!cdr) {
         return res.status(400).json({ error: 'Arquivo (.cdr) é obrigatório (campo "file").' });
       }
-
       const ext = path.extname(cdr.originalname || '').toLowerCase();
       if (ext !== '.cdr' || !onlyCDR(cdr.originalname, cdr.mimetype)) {
         return res.status(415).json({ error: 'Apenas arquivos .cdr são aceitos.' });
       }
+      if (cdr.size > CDR_MAX_BYTES) {
+        return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
+      }
 
-      // ---- lista (opcional)
-      const listaArr = req.files?.lista_nomes || [];
-      const lista = listaArr[0]; // pode ser undefined
-
-      // subimos primeiro o CDR
+      // sobe o CDR
       const keyCdr = buildKey(ordemId, itemId, cdr.originalname);
-      await s3.send(
-        new PutObjectCommand({
-          Bucket: R2_BUCKET,
-          Key: keyCdr,
-          Body: cdr.buffer,
-          ContentType: cdr.mimetype || 'application/octet-stream',
-          ContentLength: cdr.size,
-        })
-      );
+      await r2.send(new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: keyCdr,
+        Body: cdr.buffer,
+        ContentType: cdr.mimetype || 'application/octet-stream',
+        ContentLength: cdr.size,
+      }));
 
-      // soft-delete de CDRs ativos anteriores
+      // soft-delete de CDRs anteriores do item
       await db.query(
         `UPDATE ordem_item_arquivo
            SET deleted_at = NOW()
          WHERE item_id = $1
            AND deleted_at IS NULL
-           AND content_type <> 'application/json'`,
+           AND key LIKE '%/corel/%'`,
         [itemId]
       );
 
-      // grava o registro do CDR
+      // registra o CDR
       const insCdr = await db.query(
         `INSERT INTO ordem_item_arquivo
-          (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+           (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
          VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
          RETURNING id`,
         [
           ordemId,
           itemId,
           keyCdr,
-          cdr.originalname,
+          cdr.originalname || 'layout.cdr',
           cdr.mimetype || 'application/octet-stream',
           cdr.size,
           req.user?.id || null,
         ]
       );
 
+      // ---- lista (opcional)
       let listaSaved = null;
-
+      const lista = (req.files?.lista_nomes || [])[0];
       if (lista) {
-        // valida tipo (aceitamos application/json ou octet-stream vindo do browser)
-        const ct = (lista.mimetype || '').toLowerCase();
-        if (ct && !/json|octet-stream/.test(ct)) {
-          return res.status(415).json({ error: 'Lista deve ser JSON.' });
-        }
+        const keyLista = buildListKey(ordemId, itemId);
+        await r2.send(new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: keyLista,
+          Body: lista.buffer,
+          ContentType: 'application/json; charset=utf-8',
+          ContentLength: lista.size,
+        }));
 
-        const keyLista = buildListaKey(ordemId, itemId);
-
-        await s3.send(
-          new PutObjectCommand({
-            Bucket: R2_BUCKET,
-            Key: keyLista,
-            Body: lista.buffer,
-            ContentType: 'application/json',
-            ContentLength: lista.size,
-          })
-        );
-
-        // soft-delete de listas anteriores (somente content_type json)
+        // soft-delete apenas das LISTAS anteriores
         await db.query(
           `UPDATE ordem_item_arquivo
              SET deleted_at = NOW()
-           WHERE item_id = $1
-             AND deleted_at IS NULL
-             AND content_type = 'application/json'`,
+           WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/listas/%'`,
           [itemId]
         );
 
-        // grava o registro da lista
         const insLista = await db.query(
           `INSERT INTO ordem_item_arquivo
-            (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
-           RETURNING id`,
+             (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+            RETURNING id`,
           [
             ordemId,
             itemId,
@@ -258,17 +200,14 @@ router.post(
       if (e?.code === 'LIMIT_FILE_SIZE') {
         return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
       }
-      // expõe detalhes para debug
       return res.status(500).json({
         error: 'Falha ao concluir upload/registro do CDR.',
         detail: e?.message || String(e),
         pgcode: e?.code || null
       });
     }
-    
   }
 );
-
 
 /* =========================================================
  * 1b) UPLOAD/ATUALIZA a LISTA DE NOMES (JSON)
@@ -287,7 +226,6 @@ router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res)
       return res.status(400).json({ erro: 'Campo "lista" precisa ser um array não vazio.' });
     }
 
-    // monta payload final (mantém espaço p/ evoluir o formato)
     const payload = {
       modelo_codigo: modelo_codigo || null,
       gerado_em: new Date().toISOString(),
@@ -301,17 +239,15 @@ router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res)
     const bodyStr = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
     const key = buildListKey(ordemId, itemId);
 
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        Body: bodyStr,
-        ContentType: 'application/json; charset=utf-8',
-        ContentLength: bodyStr.length,
-      })
-    );
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: bodyStr,
+      ContentType: 'application/json; charset=utf-8',
+      ContentLength: bodyStr.length,
+    }));
 
-    // ⚠️ Soft-delete apenas das LISTAS anteriores
+    // soft-delete de listas anteriores
     await db.query(
       `UPDATE ordem_item_arquivo
          SET deleted_at = NOW()
@@ -403,7 +339,7 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
 
     const { key, nome_original, content_type } = q.rows[0];
     const url = await getSignedUrl(
-      s3,
+      r2,
       new GetObjectCommand({
         Bucket: R2_BUCKET,
         Key: key,
@@ -417,6 +353,40 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
   } catch (e) {
     console.error('download-url (último) erro:', e);
     return res.status(500).json({ erro: 'Falha ao gerar URL de download.' });
+  }
+});
+
+/* =========================================================
+ * 3b) URL por ID (genérica – serve p/ CDR e JSON)
+ *     GET /ordens/arquivos/:arquivoId/url
+ * ========================================================= */
+router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
+  try {
+    const { arquivoId } = req.params;
+    const { rows } = await db.query(
+      `SELECT key, nome_original, content_type
+         FROM ordem_item_arquivo
+        WHERE id = $1 AND deleted_at IS NULL`,
+      [arquivoId]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+
+    const { key, nome_original, content_type } = rows[0];
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: key,
+        ResponseContentType: content_type || 'application/octet-stream',
+        ResponseContentDisposition: `attachment; filename="${encodeURIComponent(nome_original)}"`,
+      }),
+      { expiresIn: 60 * 10 }
+    );
+
+    res.json({ url, expiresInSec: 600 });
+  } catch (e) {
+    console.error('download-url (por id) erro:', e);
+    res.status(500).json({ erro: 'Falha ao gerar URL' });
   }
 });
 
@@ -438,8 +408,7 @@ router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, r
         WHERE ordem_id = $1
           AND item_id  = $2
           AND deleted_at IS NULL
-          AND status = 'uploaded'
-          AND key LIKE '%/listas/%'
+          AND content_type = 'application/json'
         ORDER BY created_at DESC
         LIMIT 1`,
       [ordemId, itemId]
@@ -451,7 +420,7 @@ router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, r
 
     const { key, nome_original } = q.rows[0];
     const url = await getSignedUrl(
-      s3,
+      r2,
       new GetObjectCommand({
         Bucket: R2_BUCKET,
         Key: key,
@@ -469,41 +438,7 @@ router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, r
 });
 
 /* =========================================================
- * 3b) URL por ID (genérica – serve p/ CDR e JSON)
- *     GET /ordens/arquivos/:arquivoId/url
- * ========================================================= */
-router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
-  try {
-    const { arquivoId } = req.params;
-    const { rows } = await db.query(
-      `SELECT key, nome_original, content_type
-         FROM ordem_item_arquivo
-        WHERE id = $1 AND deleted_at IS NULL`,
-      [arquivoId]
-    );
-    if (rows.length === 0) return res.status(404).json({ erro: 'Arquivo não encontrado' });
-
-    const { key, nome_original, content_type } = rows[0];
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: key,
-        ResponseContentType: content_type || 'application/octet-stream',
-        ResponseContentDisposition: `attachment; filename="${encodeURIComponent(nome_original)}"`,
-      }),
-      { expiresIn: 60 * 10 }
-    );
-
-    res.json({ url, expiresInSec: 600 });
-  } catch (e) {
-    console.error('download-url (por id) erro:', e);
-    res.status(500).json({ erro: 'Falha ao gerar URL' });
-  }
-});
-
-/* =========================================================
- * 4) DELETE (genérico)
+ * 4) DELETE (soft + tenta remover do R2)
  * ========================================================= */
 router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
   const client = await db.connect();
@@ -518,8 +453,9 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 
     const key = rows[0].key;
 
+    // tenta excluir do R2; se falhar, segue com soft delete
     try {
-      await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+      await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
     } catch (e) {
       console.warn('Falha ao remover do R2 (seguindo com soft-delete):', e?.message);
     }
@@ -536,7 +472,8 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 });
 
 /* =========================================================
- * (Opcional) Presigned PUT (mantido)
+ * 5) (Opcional) Presigned PUT para upload direto do front
+ *     POST /ordens/:ordemId/itens/:itemId/cdr/upload-url
  * ========================================================= */
 router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
   try {
@@ -563,64 +500,12 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
       ContentType: content_type,
       ContentLength: Number(tamanho_bytes),
     });
-    const uploadUrl = await getSignedUrl(s3, cmd, { expiresIn: 15 * 60 });
+    const uploadUrl = await getSignedUrl(r2, cmd, { expiresIn: 15 * 60 });
 
     return res.json({ objectKey: Key, uploadUrl, expiresInSec: 900 });
   } catch (e) {
     console.error('upload-url erro:', e);
     return res.status(500).json({ erro: 'Falha ao gerar URL de upload.' });
-  }
-});
-
-router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
-  const client = await db.connect();
-  try {
-    const { ordemId, itemId } = req.params;
-    const { objectKey, tamanho_bytes, hash, nome_original, content_type } = req.body || {};
-
-    if (!(await assertItemDaOrdem(ordemId, itemId))) {
-      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
-    }
-    if (!objectKey || !nome_original || !content_type || !Number.isFinite(Number(tamanho_bytes))) {
-      return res.status(400).json({ erro: 'Parâmetros inválidos.' });
-    }
-    if (!onlyCDR(nome_original, content_type)) {
-      return res.status(415).json({ erro: 'Apenas arquivos .cdr são aceitos.' });
-    }
-    if (Number(tamanho_bytes) > CDR_MAX_BYTES) {
-      return res.status(413).json({ erro: `Arquivo acima de ${CDR_MAX_MB} MB.` });
-    }
-
-    const esperado = `ordens/${ordemId}/itens/${itemId}/corel/`;
-    if (!String(objectKey).startsWith(esperado)) {
-      return res.status(400).json({ erro: 'objectKey não corresponde à ordem/item informados.' });
-    }
-
-    await client.query('BEGIN');
-
-    await client.query(
-      `UPDATE ordem_item_arquivo
-         SET deleted_at = NOW()
-       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
-      [itemId]
-    );
-
-    const ins = await client.query(
-      `INSERT INTO ordem_item_arquivo
-         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
-       RETURNING id`,
-      [ordemId, itemId, objectKey, nome_original, content_type, Number(tamanho_bytes), req.user?.id || null]
-    );
-
-    await client.query('COMMIT');
-    return res.json({ arquivo_id: ins.rows[0].id, status: 'uploaded', hash: hash || null });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('confirm erro:', e);
-    return res.status(500).json({ erro: 'Falha ao confirmar upload.' });
-  } finally {
-    client.release();
   }
 });
 
