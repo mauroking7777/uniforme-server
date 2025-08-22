@@ -38,9 +38,9 @@ router.post('/login', async (req, res) => {
       `,
       [usuario.id]
     );
-
-    const acessos       = acessosQuery.rows.map(a => a.nome); // compatível com o front atual
-    const acessos_slugs = acessosQuery.rows.map(a => a.slug); // para migração futura
+    
+    const acessos       = acessosQuery.rows.map(a => a.nome); // compatível com o front
+    const acessos_slugs = acessosQuery.rows.map(a => a.slug); // futuro
     const acessos_ids   = acessosQuery.rows.map(a => a.id);
 
     // Gera token com expiração 23:59 do dia

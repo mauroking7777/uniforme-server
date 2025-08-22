@@ -9,9 +9,9 @@ const router = express.Router();
  * Use ?ativos=false para trazer todos.
  * Retorna: [{ id, slug, nome, ativo }]
  */
-router.get('/', async (req, res) => {
+ router.get('/', async (req, res) => {
   try {
-    const ativos = req.query.ativos !== 'false'; // default = true
+    const ativos = req.query.ativos !== 'false'; // default: true
     const { rows } = await db.query(
       `
       SELECT id, slug, nome, ativo

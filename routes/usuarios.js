@@ -88,9 +88,8 @@ router.put('/:id', async (req, res) => {
 // Buscar acessos de um usuário (agora com slug e só setores ativos)
 router.get('/:id/acessos', async (req, res) => {
   const { id } = req.params;
-
   try {
-    const resultado = await db.query(
+    const { rows } = await db.query(
       `
       SELECT s.id, s.slug, s.nome
       FROM public.acessos_usuario au
@@ -101,13 +100,13 @@ router.get('/:id/acessos', async (req, res) => {
       `,
       [id]
     );
-
-    res.json(resultado.rows);
+    res.json(rows);
   } catch (erro) {
     console.error('Erro ao buscar acessos do usuário:', erro);
     res.status(500).json({ erro: 'Erro ao buscar acessos do usuário' });
   }
 });
+
 
 
 // Salvar (ou atualizar) acessos de um usuário
