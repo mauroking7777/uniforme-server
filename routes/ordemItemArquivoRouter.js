@@ -509,6 +509,55 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
   }
 });
 
+// CONFIRMAR upload já feito direto no R2 e registrar no banco
+router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { objectKey, nome_original, content_type, tamanho_bytes } = req.body || {};
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!objectKey || !/\.cdr$/i.test(objectKey)) {
+      return res.status(400).json({ erro: 'objectKey inválido (precisa ser um .cdr).' });
+    }
+    if (!String(objectKey).includes(`/ordens/${ordemId}/itens/${itemId}/`)) {
+      return res.status(400).json({ erro: 'objectKey não confere com a ordem/item.' });
+    }
+
+    // Desativa CDRs anteriores deste item
+    await db.query(
+      `UPDATE ordem_item_arquivo
+         SET deleted_at = NOW()
+       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
+      [itemId]
+    );
+
+    // Registra o novo arquivo
+    const { rows } = await db.query(
+      `INSERT INTO ordem_item_arquivo
+         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+       RETURNING id, key, created_at`,
+      [
+        ordemId,
+        itemId,
+        objectKey,
+        nome_original || 'layout.cdr',
+        content_type || 'application/octet-stream',
+        Number(tamanho_bytes) || null,
+        req.user?.id || null,
+      ]
+    );
+
+    res.json({ ok: true, arquivo: rows[0] });
+  } catch (e) {
+    console.error('cdr/confirm erro:', e);
+    res.status(500).json({ erro: 'Falha ao registrar arquivo' });
+  }
+});
+
+
 
 
 export default router;
