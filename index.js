@@ -32,7 +32,7 @@ import extractListRouter from './routes/extractListRouter.js';
 
 import ordemSetoresRouter from './routes/ordemProducaoUniformeSetoresRouter.js';
 import setoresImpressaoOrdensRouter from './routes/setoresImpressaoOrdensRouter.js';
-
+import setorConfiguracaoRouter from './routes/setorConfiguracaoRouter.js';
 
 
 const app = express();
@@ -72,6 +72,7 @@ app.use(ordemProducaoUniformeTamanhosRouter);
 app.use('/ordens', ordemItemArquivoRouter);
 app.use('/', ordemSetoresRouter);
 app.use('/', setoresImpressaoOrdensRouter);
+app.use('/', setorConfiguracaoRouter);
 
 
 // Saúde
