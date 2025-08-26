@@ -1,22 +1,20 @@
+// src/r2Client.js
 import { S3Client } from "@aws-sdk/client-s3";
+import { NodeHttpHandler } from "@aws-sdk/node-http-handler";
+import https from "https";
 
-const {
-  R2_ACCOUNT_ID,
-  R2_ACCESS_KEY_ID,
-  R2_SECRET_ACCESS_KEY,
-} = process.env;
+const { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT } = process.env;
 
-if (!R2_ACCOUNT_ID || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
-  console.error("Faltam variáveis do R2 (ACCOUNT_ID/ACCESS_KEY_ID/SECRET_ACCESS_KEY).");
-}
+const httpsAgent = new https.Agent({
+  keepAlive: true,
+  minVersion: "TLSv1.2",
+  maxVersion: "TLSv1.3",
+});
 
 export const r2 = new S3Client({
   region: "auto",
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-  // mantém path-style para R2 e evita o handshake problemático
+  endpoint: R2_ENDPOINT || `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
   forcePathStyle: true,
+  requestHandler: new NodeHttpHandler({ httpsAgent }),
 });
