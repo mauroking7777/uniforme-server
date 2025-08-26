@@ -1,4 +1,3 @@
-// routes/ordemItemArquivoRouter.js
 import express from 'express';
 import path from 'node:path';
 import crypto from 'crypto';
@@ -6,7 +5,7 @@ import multer from 'multer';
 
 import db from '../db.js';
 import { auth as requireAuth } from './auth.js';
-import { r2 } from './r2Client.js'
+import { r2 } from './r2Client.js';
 
 import {
   PutObjectCommand,
@@ -55,19 +54,17 @@ function onlyCDR(nome, contentType) {
     'application/vnd.corel-draw',
     'application/cdr',
     'image/cdr',
-    '', // alguns browsers mandam vazio
+    '',
     'application/octet-stream',
   ]);
   return okExt && allowed.has(type);
 }
 
-// ➕ key p/ CDR
 function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${crypto.randomUUID()}_${base}.cdr`;
 }
 
-// ➕ key p/ JSON (lista de nomes)
 function buildListKey(ordemId, itemId, nomeBase = 'lista-nomes.json') {
   const base = sanitizeFileName(nomeBase.replace(/\.json$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/listas/${Date.now()}_${crypto.randomUUID()}_${base}.json`;
@@ -83,10 +80,6 @@ async function assertItemDaOrdem(ordemId, itemId) {
 
 /* =========================================================
  * 1) UPLOAD DIRETO do CDR (+ lista JSON opcional)
- *     POST  /ordens/:ordemId/itens/:itemId/cdr/upload
- *     multipart/form-data:
- *       - file (obrigatório) -> .cdr
- *       - lista_nomes (opcional) -> application/json
  * ========================================================= */
 router.post(
   '/:ordemId/itens/:itemId/cdr/upload',
@@ -100,7 +93,6 @@ router.post(
         return res.status(400).json({ error: 'Item não pertence à ordem informada.' });
       }
 
-      // ---- CDR (obrigatório)
       const cdr = (req.files?.file || [])[0];
       if (!cdr) {
         return res.status(400).json({ error: 'Arquivo (.cdr) é obrigatório (campo "file").' });
@@ -211,8 +203,6 @@ router.post(
 
 /* =========================================================
  * 1b) UPLOAD/ATUALIZA a LISTA DE NOMES (JSON)
- *     POST /ordens/:ordemId/itens/:itemId/lista-nomes
- *     Body: { lista: [...], modelo_codigo?: "BA37OK" }
  * ========================================================= */
 router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res) => {
   try {
@@ -279,8 +269,7 @@ router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res)
 });
 
 /* =========================================================
- * 2) LISTAR ARQUIVOS ATIVOS DO ITEM (CDR + JSON)
- *     GET /ordens/:ordemId/itens/:itemId/cdr/list
+ * 2) LISTAR ARQUIVOS ATIVOS DO ITEM
  * ========================================================= */
 router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => {
   try {
@@ -310,7 +299,6 @@ router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => 
 
 /* =========================================================
  * 3a) URL do CDR mais recente
- *     GET /ordens/:ordemId/itens/:itemId/cdr/download-url
  * ========================================================= */
 router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, res) => {
   try {
@@ -357,8 +345,7 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
 });
 
 /* =========================================================
- * 3b) URL por ID (genérica – serve p/ CDR e JSON)
- *     GET /ordens/arquivos/:arquivoId/url
+ * 3b) URL por ID (genérica – CDR/JSON)
  * ========================================================= */
 router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
   try {
@@ -392,7 +379,6 @@ router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
 
 /* =========================================================
  * 3c) URL da LISTA DE NOMES (JSON) mais recente
- *     GET /ordens/:ordemId/itens/:itemId/lista-nomes/url
  * ========================================================= */
 router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, res) => {
   try {
@@ -453,7 +439,6 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 
     const key = rows[0].key;
 
-    // tenta excluir do R2; se falhar, segue com soft delete
     try {
       await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }));
     } catch (e) {
@@ -472,8 +457,7 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
 });
 
 /* =========================================================
- * 5) (Opcional) Presigned PUT para upload direto do front
- *     POST /ordens/:ordemId/itens/:itemId/cdr/upload-url
+ * 5) Presigned PUT para upload direto do front
  * ========================================================= */
 router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
   try {
@@ -509,7 +493,9 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
   }
 });
 
-// CONFIRMAR upload já feito direto no R2 e registrar no banco
+/* =========================================================
+ * 6) Confirmar upload direto (registrar no BD)
+ * ========================================================= */
 router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
@@ -556,8 +542,5 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
     res.status(500).json({ erro: 'Falha ao registrar arquivo' });
   }
 });
-
-
-
 
 export default router;

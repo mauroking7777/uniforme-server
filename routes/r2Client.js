@@ -1,4 +1,3 @@
-// src/r2Client.js
 import { S3Client } from "@aws-sdk/client-s3";
 
 const {
@@ -18,6 +17,6 @@ export const r2 = new S3Client({
     accessKeyId: R2_ACCESS_KEY_ID,
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
-  // 👇 ESSA LINHA resolve o “EPROTO … sslv3 alert handshake failure”
+  // mantém path-style para R2 e evita o handshake problemático
   forcePathStyle: true,
 });
