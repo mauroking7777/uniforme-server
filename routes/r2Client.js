@@ -18,4 +18,6 @@ export const r2 = new S3Client({
     accessKeyId: R2_ACCESS_KEY_ID,
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
+  // 👇 ESSA LINHA resolve o “EPROTO … sslv3 alert handshake failure”
+  forcePathStyle: true,
 });
