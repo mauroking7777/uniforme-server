@@ -31,6 +31,9 @@ import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
 import extractListRouter from './routes/extractListRouter.js';
 
 import ordemSetoresRouter from './routes/ordemProducaoUniformeSetoresRouter.js';
+import setoresImpressaoOrdensRouter from './routes/setoresImpressaoOrdensRouter.js';
+
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -68,6 +71,8 @@ app.use(ordemProducaoUniformeTamanhosRouter);
 // router.post('/:ordemId/itens/:itemId/cdr/upload', upload.single('file'), handler)
 app.use('/ordens', ordemItemArquivoRouter);
 app.use('/', ordemSetoresRouter);
+app.use('/', setoresImpressaoOrdensRouter);
+
 
 // Saúde
 app.get('/', (req, res) => {
