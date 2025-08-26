@@ -1,6 +1,6 @@
 // src/r2Client.js
 import { S3Client } from "@aws-sdk/client-s3";
-import { NodeHttpHandler } from "@aws-sdk/node-http-handler";
+import { NodeHttpHandler } from "@smithy/node-http-handler";
 import https from "https";
 
 const { R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT } = process.env;
