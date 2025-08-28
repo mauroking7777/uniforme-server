@@ -5,9 +5,7 @@ import { auth as requireAuth } from './auth.js';
 
 const router = express.Router();
 
-/**
- * Confere se a ordem existe
- */
+/** Confere se a ordem existe */
 async function ordemExiste(ordemId) {
   const q = await db.query(
     'SELECT 1 FROM public.ordem_producao_uniformes_dados_ordem WHERE id = $1 LIMIT 1',
@@ -16,9 +14,23 @@ async function ordemExiste(ordemId) {
   return q.rowCount > 0;
 }
 
-/**
- * Resolve lista de IDs de setores a partir de slugs
- */
+/** Descobre se a tabela ordem_setores tem a coluna "status" (cacheado em memória) */
+let cacheTemColStatus = null;
+async function temColunaStatus() {
+  if (cacheTemColStatus !== null) return cacheTemColStatus;
+  const sql = `
+    SELECT 1
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name   = 'ordem_setores'
+       AND column_name  = 'status'
+     LIMIT 1`;
+  const r = await db.query(sql);
+  cacheTemColStatus = r.rowCount > 0;
+  return cacheTemColStatus;
+}
+
+/** Resolve lista de IDs de setores a partir de slugs */
 async function resolverSetorIdsPorSlugs(slugs = []) {
   if (!Array.isArray(slugs) || slugs.length === 0) return [];
   const { rows } = await db.query(
@@ -30,12 +42,7 @@ async function resolverSetorIdsPorSlugs(slugs = []) {
   return rows.map(r => r.id);
 }
 
-/**
- * GET: lista os setores vinculados a uma ordem
- * (devolve nome/slug/status para o front exibir as seleções)
- * Obs.: deixei sem requireAuth para não quebrar telas que já consomem sem token;
- * se quiser fechar, basta adicionar requireAuth como middleware.
- */
+/** GET: lista os setores vinculados (apenas o necessário p/ front) */
 router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
   try {
     const { ordemId } = req.params;
@@ -45,18 +52,9 @@ router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
     }
 
     const { rows } = await db.query(
-      `SELECT os.ordem_id,
-              os.setor_id,
-              os.status,
-              os.recebida_em,
-              os.iniciada_em,
-              os.concluida_em,
-              os.prioridade,
-              s.nome,
-              s.slug
+      `SELECT s.id, s.slug, s.nome
          FROM public.ordem_setores os
-         JOIN public.setores s
-           ON s.id = os.setor_id
+         JOIN public.setores s ON s.id = os.setor_id
         WHERE os.ordem_id = $1
         ORDER BY s.ordem_exibicao NULLS LAST, s.nome`,
       [ordemId]
@@ -70,11 +68,10 @@ router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
 });
 
 /**
- * POST: sincroniza setores vinculados à ordem (adiciona os faltantes e remove os que não estiverem mais na lista)
- * Requer auth. Aceita body com { setor_ids?: number[], slugs?: string[] }.
- * Regras:
- *  - Vínculos novos nascem com status = 'aguardando'
- *  - Backfill: vínculos existentes com status NULL são atualizados para 'aguardando'
+ * POST: sincroniza setores vinculados à ordem (adiciona os faltantes e remove os demais)
+ * Body: { setor_ids?: number[], slugs?: string[] }
+ * Requer auth.
+ * - Vínculos novos nascem com status='aguardando' SE a coluna existir
  */
 router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) => {
   const client = await db.connect();
@@ -87,36 +84,25 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
     }
 
     // Normaliza lista de IDs
-    let ids = Array.isArray(setorIds) ? setorIds.filter(n => Number.isFinite(n * 1)).map(n => Number(n)) : [];
+    let ids = Array.isArray(setorIds)
+      ? setorIds.filter(n => Number.isFinite(n * 1)).map(n => Number(n))
+      : [];
 
     // Se vieram slugs, resolve para ids
     if ((!ids || ids.length === 0) && Array.isArray(slugs) && slugs.length > 0) {
       ids = await resolverSetorIdsPorSlugs(slugs);
     }
 
-    // Se continuar vazio, não há o que vincular
+    await client.query('BEGIN');
+
+    // Se vazio, zera os vínculos
     if (!ids || ids.length === 0) {
-      // Permito "zerar" vínculos: apago todos.
-      await client.query('BEGIN');
       await client.query('DELETE FROM public.ordem_setores WHERE ordem_id = $1', [ordemId]);
       await client.query('COMMIT');
-
       return res.json({ ok: true, setores: [] });
     }
 
-    // Traz vínculos atuais
-    const { rows: atuais } = await db.query(
-      `SELECT setor_id FROM public.ordem_setores WHERE ordem_id = $1`,
-      [ordemId]
-    );
-    const atuaisSet = new Set(atuais.map(r => Number(r.setor_id)));
-
-    const novos = ids.filter(id => !atuaisSet.has(Number(id)));
-    const manter = ids.filter(id => atuaisSet.has(Number(id)));
-
-    await client.query('BEGIN');
-
-    // Remove os que não estão mais na lista enviada
+    // Remove os que não estão mais na lista
     await client.query(
       `DELETE FROM public.ordem_setores
         WHERE ordem_id = $1
@@ -124,46 +110,33 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
       [ordemId, ids]
     );
 
-    // Insere os novos com status 'aguardando'
-    if (novos.length > 0) {
-      for (const sid of novos) {
+    // Insere (idempotente via ON CONFLICT). Se houver coluna "status", nasce como 'aguardando'
+    const colTemStatus = await temColunaStatus();
+    for (const sid of ids) {
+      if (colTemStatus) {
         await client.query(
-          `INSERT INTO public.ordem_setores (ordem_id, setor_id, status, recebida_em)
-           VALUES ($1, $2, 'aguardando', NOW())
+          `INSERT INTO public.ordem_setores (ordem_id, setor_id, status)
+           VALUES ($1, $2, 'aguardando')
+           ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
+          [ordemId, sid]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO public.ordem_setores (ordem_id, setor_id)
+           VALUES ($1, $2)
            ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
           [ordemId, sid]
         );
       }
     }
 
-    // Backfill de segurança: se houver vínculos (antigos ou mantidos) com status NULL, corrige para 'aguardando'
-    if (manter.length > 0) {
-      await client.query(
-        `UPDATE public.ordem_setores
-            SET status = 'aguardando'
-          WHERE ordem_id = $1
-            AND setor_id = ANY($2::int[])
-            AND status IS NULL`,
-        [ordemId, manter]
-      );
-    }
-
     await client.query('COMMIT');
 
-    // Retorna visão atualizada (join com setores, ordenado)
+    // Retorna visão atualizada (apenas id/slug/nome)
     const { rows } = await db.query(
-      `SELECT os.ordem_id,
-              os.setor_id,
-              os.status,
-              os.recebida_em,
-              os.iniciada_em,
-              os.concluida_em,
-              os.prioridade,
-              s.nome,
-              s.slug
+      `SELECT s.id, s.slug, s.nome
          FROM public.ordem_setores os
-         JOIN public.setores s
-           ON s.id = os.setor_id
+         JOIN public.setores s ON s.id = os.setor_id
         WHERE os.ordem_id = $1
         ORDER BY s.ordem_exibicao NULLS LAST, s.nome`,
       [ordemId]
