@@ -14,7 +14,7 @@ async function ordemExiste(ordemId) {
   return q.rowCount > 0;
 }
 
-/** Descobre se a tabela ordem_setores tem a coluna "status" (cacheado em memória) */
+/** Descobre se a tabela ordem_setores tem a coluna "status" (cache em memória) */
 let cacheTemColStatus = null;
 async function temColunaStatus() {
   if (cacheTemColStatus !== null) return cacheTemColStatus;
@@ -42,7 +42,7 @@ async function resolverSetorIdsPorSlugs(slugs = []) {
   return rows.map(r => r.id);
 }
 
-/** GET: lista os setores vinculados (apenas o necessário p/ front) */
+/** GET: lista setores vinculados (apenas o necessário pro front) */
 router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
   try {
     const { ordemId } = req.params;
@@ -62,17 +62,12 @@ router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
 
     return res.json(rows);
   } catch (e) {
-    console.error('GET setores da ordem erro:', e);
+    console.error('GET /ordens-uniformes/:ordemId/setores erro:', e);
     return res.status(500).json({ erro: 'Falha ao buscar setores da ordem.' });
   }
 });
 
-/**
- * POST: sincroniza setores vinculados à ordem (adiciona os faltantes e remove os demais)
- * Body: { setor_ids?: number[], slugs?: string[] }
- * Requer auth.
- * - Vínculos novos nascem com status='aguardando' SE a coluna existir
- */
+/** POST: sincroniza setores da ordem (add faltantes, remove não selecionados) */
 router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) => {
   const client = await db.connect();
   try {
@@ -83,19 +78,19 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
       return res.status(404).json({ erro: 'Ordem não encontrada.' });
     }
 
-    // Normaliza lista de IDs
+    // Normaliza IDs
     let ids = Array.isArray(setorIds)
       ? setorIds.filter(n => Number.isFinite(n * 1)).map(n => Number(n))
       : [];
 
-    // Se vieram slugs, resolve para ids
+    // Resolve por slugs, se necessário
     if ((!ids || ids.length === 0) && Array.isArray(slugs) && slugs.length > 0) {
       ids = await resolverSetorIdsPorSlugs(slugs);
     }
 
     await client.query('BEGIN');
 
-    // Se vazio, zera os vínculos
+    // Se vazio, zera vínculos
     if (!ids || ids.length === 0) {
       await client.query('DELETE FROM public.ordem_setores WHERE ordem_id = $1', [ordemId]);
       await client.query('COMMIT');
@@ -110,7 +105,7 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
       [ordemId, ids]
     );
 
-    // Insere (idempotente via ON CONFLICT). Se houver coluna "status", nasce como 'aguardando'
+    // Insere novos vínculos (idempotente)
     const colTemStatus = await temColunaStatus();
     for (const sid of ids) {
       if (colTemStatus) {
@@ -132,7 +127,7 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
 
     await client.query('COMMIT');
 
-    // Retorna visão atualizada (apenas id/slug/nome)
+    // Retorna fotografia atual
     const { rows } = await db.query(
       `SELECT s.id, s.slug, s.nome
          FROM public.ordem_setores os
@@ -145,7 +140,7 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
     return res.json({ ok: true, setores: rows });
   } catch (e) {
     try { await client.query('ROLLBACK'); } catch {}
-    console.error('POST setores da ordem erro:', e);
+    console.error('POST /ordens-uniformes/:ordemId/setores erro:', e);
     return res.status(500).json({ erro: 'Falha ao salvar setores da ordem.' });
   } finally {
     client.release();
