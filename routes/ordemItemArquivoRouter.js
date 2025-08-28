@@ -1,3 +1,4 @@
+// routes/ordemItemArquivoRouter.js
 import express from 'express';
 import path from 'node:path';
 import crypto from 'crypto';
@@ -13,6 +14,9 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+// conversor (CloudConvert -> PNG no R2)
+import { startPreviewGeneration } from '../cloudconvertService.js';
 
 const router = express.Router();
 
@@ -78,8 +82,22 @@ async function assertItemDaOrdem(ordemId, itemId) {
   return q.rowCount > 0;
 }
 
+// assina GET do R2
+async function presignGet(objectKey, seconds = 900, contentType) {
+  return getSignedUrl(
+    r2,
+    new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: objectKey,
+      ...(contentType ? { ResponseContentType: contentType } : {}),
+    }),
+    { expiresIn: seconds }
+  );
+}
+
 /* =========================================================
  * 1) UPLOAD DIRETO do CDR (+ lista JSON opcional)
+ *    -> agora também prepara preview
  * ========================================================= */
 router.post(
   '/:ordemId/itens/:itemId/cdr/upload',
@@ -140,6 +158,21 @@ router.post(
           cdr.size,
           req.user?.id || null,
         ]
+      );
+
+      // marca preview pendente e dispara conversão em background
+      await db.query(
+        `UPDATE ordem_producao_uniformes_dados_modelo
+            SET preview_status = 'pending',
+                preview_error = NULL,
+                preview_updated_at = NOW()
+          WHERE id = $1`,
+        [itemId]
+      );
+      setImmediate(() =>
+        startPreviewGeneration({ ordemId, itemId, cdrObjectKey: keyCdr }).catch(err =>
+          console.error('startPreviewGeneration(upload) erro:', err)
+        )
       );
 
       // ---- lista (opcional)
@@ -495,6 +528,7 @@ router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, r
 
 /* =========================================================
  * 6) Confirmar upload direto (registrar no BD)
+ *    -> agora também prepara preview
  * ========================================================= */
 router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
   try {
@@ -536,10 +570,65 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
       ]
     );
 
+    // marca preview pendente + dispara conversão (assíncrono)
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+          SET preview_status = 'pending',
+              preview_error = NULL,
+              preview_updated_at = NOW()
+        WHERE id = $1`,
+      [itemId]
+    );
+    setImmediate(() =>
+      startPreviewGeneration({ ordemId, itemId, cdrObjectKey: objectKey }).catch(err =>
+        console.error('startPreviewGeneration(confirm) erro:', err)
+      )
+    );
+
     res.json({ ok: true, arquivo: rows[0] });
   } catch (e) {
     console.error('cdr/confirm erro:', e);
     res.status(500).json({ erro: 'Falha ao registrar arquivo' });
+  }
+});
+
+/* =========================================================
+ * 7) URL do PREVIEW (PNG no R2)  ← NOVA ROTA
+ * ========================================================= */
+router.get('/:ordemId/itens/:itemId/cdr/preview-url', requireAuth, async (req, res) => {
+  try {
+    const { itemId } = req.params;
+
+    const { rows } = await db.query(
+      `SELECT preview_status, preview_object_key, preview_error
+         FROM ordem_producao_uniformes_dados_modelo
+        WHERE id = $1
+        LIMIT 1`,
+      [itemId]
+    );
+
+    if (rows.length === 0) return res.status(404).json({ erro: 'Item não encontrado.' });
+
+    const { preview_status, preview_object_key, preview_error } = rows[0] || {};
+
+    if (!preview_status) {
+      return res.status(404).json({ erro: 'Nenhum preview disponível.' });
+    }
+    if (preview_status === 'pending') {
+      return res.status(202).json({ status: 'pending' });
+    }
+    if (preview_status === 'failed') {
+      return res.status(410).json({ status: 'failed', error: preview_error || null });
+    }
+    if (preview_status === 'ready' && preview_object_key) {
+      const url = await presignGet(preview_object_key, 900, 'image/png');
+      return res.json({ url });
+    }
+
+    return res.status(404).json({ erro: 'Preview indisponível.' });
+  } catch (e) {
+    console.error('preview-url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao obter preview.' });
   }
 });
 

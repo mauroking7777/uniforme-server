@@ -3,6 +3,8 @@ import express from 'express';
 import cors from 'cors';
 import pool from './db.js';
 import 'dotenv/config';
+import 'dotenv/config';
+
 
 
 // Cadastros / catálogo
