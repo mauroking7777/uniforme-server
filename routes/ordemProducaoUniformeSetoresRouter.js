@@ -5,7 +5,9 @@ import { auth as requireAuth } from './auth.js';
 
 const router = express.Router();
 
-/** Confere se a ordem existe */
+/**
+ * Util: checa se a ordem existe
+ */
 async function ordemExiste(ordemId) {
   const q = await db.query(
     'SELECT 1 FROM public.ordem_producao_uniformes_dados_ordem WHERE id = $1 LIMIT 1',
@@ -14,35 +16,11 @@ async function ordemExiste(ordemId) {
   return q.rowCount > 0;
 }
 
-/** Descobre se a tabela ordem_setores tem a coluna "status" (cache em memória) */
-let cacheTemColStatus = null;
-async function temColunaStatus() {
-  if (cacheTemColStatus !== null) return cacheTemColStatus;
-  const sql = `
-    SELECT 1
-      FROM information_schema.columns
-     WHERE table_schema = 'public'
-       AND table_name   = 'ordem_setores'
-       AND column_name  = 'status'
-     LIMIT 1`;
-  const r = await db.query(sql);
-  cacheTemColStatus = r.rowCount > 0;
-  return cacheTemColStatus;
-}
-
-/** Resolve lista de IDs de setores a partir de slugs */
-async function resolverSetorIdsPorSlugs(slugs = []) {
-  if (!Array.isArray(slugs) || slugs.length === 0) return [];
-  const { rows } = await db.query(
-    `SELECT id
-       FROM public.setores
-      WHERE slug = ANY($1::text[])`,
-    [slugs]
-  );
-  return rows.map(r => r.id);
-}
-
-/** GET: lista setores vinculados (apenas o necessário pro front) */
+/**
+ * GET /ordens-uniformes/:ordemId/setores
+ * -> setores atualmente marcados nessa ordem
+ * Retorna: [{ id, slug, nome }]
+ */
 router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
   try {
     const { ordemId } = req.params;
@@ -52,96 +30,94 @@ router.get('/ordens-uniformes/:ordemId/setores', async (req, res) => {
     }
 
     const { rows } = await db.query(
-      `SELECT s.id, s.slug, s.nome
-         FROM public.ordem_setores os
-         JOIN public.setores s ON s.id = os.setor_id
-        WHERE os.ordem_id = $1
-        ORDER BY s.ordem_exibicao NULLS LAST, s.nome`,
+      `
+      SELECT s.id, s.slug, s.nome
+      FROM public.ordem_setores os
+      JOIN public.setores s ON s.id = os.setor_id
+      WHERE os.ordem_id = $1
+      ORDER BY s.ordem_exibicao NULLS LAST, s.nome ASC
+      `,
       [ordemId]
     );
 
-    return res.json(rows);
+    res.json(rows);
   } catch (e) {
-    console.error('GET /ordens-uniformes/:ordemId/setores erro:', e);
-    return res.status(500).json({ erro: 'Falha ao buscar setores da ordem.' });
+    console.error('GET setores da ordem erro:', e);
+    res.status(500).json({ erro: 'Falha ao listar setores da ordem.' });
   }
 });
 
-/** POST: sincroniza setores da ordem (add faltantes, remove não selecionados) */
+/**
+ * POST /ordens-uniformes/:ordemId/setores
+ * Sincroniza os setores da ordem.
+ * Aceita:
+ *   - { setor_ids: number[] }   OU
+ *   - { slugs: string[] }       (ex.: ["sublimacao","serigrafia","bordado"])
+ *
+ * Regra: precisa ter ao menos 1 setor.
+ */
 router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) => {
   const client = await db.connect();
   try {
     const { ordemId } = req.params;
-    let { setor_ids: setorIds, slugs } = req.body || {};
+    const { setor_ids, slugs } = req.body || {};
 
     if (!(await ordemExiste(ordemId))) {
       return res.status(404).json({ erro: 'Ordem não encontrada.' });
     }
 
-    // Normaliza IDs
-    let ids = Array.isArray(setorIds)
-      ? setorIds.filter(n => Number.isFinite(n * 1)).map(n => Number(n))
-      : [];
+    // Resolve ids a partir dos slugs, se necessário
+    let ids = Array.isArray(setor_ids) ? setor_ids.filter(Number.isFinite) : [];
 
-    // Resolve por slugs, se necessário
     if ((!ids || ids.length === 0) && Array.isArray(slugs) && slugs.length > 0) {
-      ids = await resolverSetorIdsPorSlugs(slugs);
+      const q = await db.query(
+        `SELECT id FROM public.setores WHERE slug = ANY($1::text[]) AND ativo = TRUE`,
+        [slugs]
+      );
+      ids = q.rows.map(r => r.id);
+    }
+
+    if (!ids || ids.length === 0) {
+      return res.status(400).json({ erro: 'Selecione ao menos um setor.' });
     }
 
     await client.query('BEGIN');
 
-    // Se vazio, zera vínculos
-    if (!ids || ids.length === 0) {
-      await client.query('DELETE FROM public.ordem_setores WHERE ordem_id = $1', [ordemId]);
-      await client.query('COMMIT');
-      return res.json({ ok: true, setores: [] });
-    }
-
-    // Remove os que não estão mais na lista
+    // Remove o que não está mais selecionado
     await client.query(
       `DELETE FROM public.ordem_setores
         WHERE ordem_id = $1
-          AND setor_id NOT IN (SELECT unnest($2::int[]))`,
+          AND NOT (setor_id = ANY($2::int[]))`,
       [ordemId, ids]
     );
 
-    // Insere novos vínculos (idempotente)
-    const colTemStatus = await temColunaStatus();
+    // Adiciona os que faltam (idempotente pelo UNIQUE(ordem_id,setor_id))
     for (const sid of ids) {
-      if (colTemStatus) {
-        await client.query(
-          `INSERT INTO public.ordem_setores (ordem_id, setor_id, status)
-           VALUES ($1, $2, 'aguardando')
-           ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
-          [ordemId, sid]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO public.ordem_setores (ordem_id, setor_id)
-           VALUES ($1, $2)
-           ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
-          [ordemId, sid]
-        );
-      }
+      await client.query(
+        `INSERT INTO public.ordem_setores (ordem_id, setor_id)
+         VALUES ($1, $2)
+         ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
+        [ordemId, sid]
+      );
     }
 
     await client.query('COMMIT');
 
-    // Retorna fotografia atual
+    // Retorna a fotografia atual
     const { rows } = await db.query(
       `SELECT s.id, s.slug, s.nome
          FROM public.ordem_setores os
          JOIN public.setores s ON s.id = os.setor_id
         WHERE os.ordem_id = $1
-        ORDER BY s.ordem_exibicao NULLS LAST, s.nome`,
+        ORDER BY s.ordem_exibicao NULLS LAST, s.nome ASC`,
       [ordemId]
     );
 
-    return res.json({ ok: true, setores: rows });
+    res.json({ ok: true, setores: rows });
   } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('POST /ordens-uniformes/:ordemId/setores erro:', e);
-    return res.status(500).json({ erro: 'Falha ao salvar setores da ordem.' });
+    await client.query('ROLLBACK');
+    console.error('POST setores da ordem erro:', e);
+    res.status(500).json({ erro: 'Falha ao salvar setores da ordem.' });
   } finally {
     client.release();
   }

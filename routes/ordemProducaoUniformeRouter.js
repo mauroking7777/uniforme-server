@@ -1,7 +1,5 @@
 import express from 'express';
 import db from '../db.js';
-import { auth as requireAuth } from './auth.js';
-
 
 const router = express.Router();
 
@@ -56,48 +54,6 @@ router.post('/ordens-uniformes', async (req, res) => {
     });
   }
 });
-
-// POST /ordens-uniformes/:id/enviar
-router.post('/ordens-uniformes/:id/enviar', requireAuth, async (req, res) => {
-  const client = await db.connect();
-  try {
-    const { id } = req.params;
-
-    await client.query('BEGIN');
-
-    // Atualiza status da ordem
-    await client.query(
-      `UPDATE ordem_producao_uniformes_dados_ordem
-         SET status = 'enviada'
-       WHERE id = $1`,
-      [id]
-    );
-
-    // Garante vínculo com setor "configuracao"
-    const { rows } = await client.query(
-      `SELECT id FROM setores WHERE slug = 'configuracao' LIMIT 1`
-    );
-    if (rows.length > 0) {
-      const setorId = rows[0].id;
-      await client.query(
-        `INSERT INTO ordem_setores (ordem_id, setor_id, status)
-         VALUES ($1, $2, 'aguardando')
-         ON CONFLICT (ordem_id, setor_id) DO NOTHING`,
-        [id, setorId]
-      );
-    }
-
-    await client.query('COMMIT');
-    return res.json({ ok: true });
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('Erro ao enviar ordem:', e);
-    return res.status(500).json({ erro: 'Falha ao enviar ordem' });
-  } finally {
-    client.release();
-  }
-});
-
 
 
 // Listar todas as ordens

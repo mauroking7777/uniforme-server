@@ -4,6 +4,7 @@ import cors from 'cors';
 import pool from './db.js';
 import 'dotenv/config';
 
+
 // Cadastros / catálogo
 import rotaUsuarios from './routes/usuarios.js';
 import rotaFuncoes from './routes/funcoes.js';
@@ -14,6 +15,7 @@ import rotaTipoManga from './routes/tipoManga.js';
 import rotaDetalhamentoManga from './routes/detalhamentoManga.js';
 import rotaGrades from './routes/grades.js';
 import rotaTamanhosGrade from './routes/tamanhosGrade.js';
+// ⚠️ REMOVIDO o import duplicado:  import tamanhosGradeRouter from './routes/tamanhosGrade.js';
 import rotaSetores from './routes/setores.js';
 
 // Auth / login
@@ -24,17 +26,14 @@ import ordemProducaoUniformeRouter from './routes/ordemProducaoUniformeRouter.js
 import ordemProducaoUniformeModelosRouter from './routes/ordemProducaoUniformeModelosRouter.js';
 import ordemProducaoUniformeTamanhosRouter from './routes/ordemProducaoUniformeTamanhosRouter.js';
 
-// Upload de arquivos dos itens da ordem (CDR / lista / preview direto)
+// Upload de arquivos dos itens da ordem (CDR)
 import ordemItemArquivoRouter from './routes/ordemItemArquivoRouter.js';
 import extractListRouter from './routes/extractListRouter.js';
 
-// Setores da ordem e painéis
 import ordemSetoresRouter from './routes/ordemProducaoUniformeSetoresRouter.js';
 import setoresImpressaoOrdensRouter from './routes/setoresImpressaoOrdensRouter.js';
 import setorConfiguracaoRouter from './routes/setorConfiguracaoRouter.js';
 
-// Envio da ordem
-import rotaEnvio from './routes/ordemEnvioRouter.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -43,10 +42,11 @@ app.use(cors());
 // limite de 5mb para payload JSON (seguro para respostas do GPT)
 app.use(express.json({ limit: '5mb' }));
 
-/* ========= Auth / base ========= */
+
+// Auth / base
 app.use('/', loginRoutes);
 
-/* ========= Cadastros ========= */
+// Cadastros
 app.use('/usuarios', rotaUsuarios);
 app.use('/setores', rotaSetores);
 app.use('/funcoes', rotaFuncoes);
@@ -58,29 +58,29 @@ app.use('/detalhamento-manga', rotaDetalhamentoManga);
 app.use('/grades', rotaGrades);
 app.use('/extract-list', extractListRouter);
 
-// Tamanhos da grade
+// Tamanhos da grade (MONTAR APENAS UMA VEZ)
 app.use('/tamanhos-grade', rotaTamanhosGrade);
 
-/* ========= Ordens (uniformes) ========= */
+// Ordens (uniformes)
 app.use(ordemProducaoUniformeRouter);
 app.use(ordemProducaoUniformeModelosRouter);
 app.use(ordemProducaoUniformeTamanhosRouter);
 
-// 🔴 Prefixo /ordens para casar com o front nos uploads (CDR/preview/lista)
+// 🔴 PULO DO GATO: prefixo /ordens para casar com o front
+// O arquivo routes/ordemItemArquivoRouter.js deve declarar rotas RELATIVAS, tipo:
+// router.post('/:ordemId/itens/:itemId/cdr/upload', upload.single('file'), handler)
 app.use('/ordens', ordemItemArquivoRouter);
-
-// Setores / painéis / envio
 app.use('/', ordemSetoresRouter);
 app.use('/', setoresImpressaoOrdensRouter);
 app.use('/', setorConfiguracaoRouter);
-app.use('/', rotaEnvio);
 
-/* ========= Saúde ========= */
+
+// Saúde
 app.get('/', (req, res) => {
   res.send('Servidor Uniforme.com está rodando! 🚀');
 });
 
-// Diagnóstico opcional
+// Diagnóstico opcional (você já tinha)
 app.get('/test-db', async (req, res) => {
   try {
     const result = await pool.query('SELECT NOW()');
@@ -91,7 +91,7 @@ app.get('/test-db', async (req, res) => {
   }
 });
 
-// Rota opcional de criação de tabela (use apenas se precisar)
+// Rota opcional de criação de tabela (mantenha só se precisar mesmo)
 app.get('/criar-tabela', async (req, res) => {
   try {
     const sql = `
@@ -118,7 +118,8 @@ app.get('/criar-tabela', async (req, res) => {
   }
 });
 
-// (fallback) — se essa rota já existir em routes/tamanhosGrade.js, remova este bloco
+// Se essa rota já estiver dentro do router de tamanhosGrade, remova daqui.
+// Mantive para não quebrar seu fluxo atual.
 app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
   const { grade_id } = req.params;
   try {
@@ -132,6 +133,8 @@ app.get('/tamanhos-grade/por-grade/:grade_id', async (req, res) => {
     res.status(500).json({ erro: 'Erro ao buscar tamanhos da grade' });
   }
 });
+
+
 
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
