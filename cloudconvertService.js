@@ -1,12 +1,10 @@
 // cloudconvertService.js
 import CloudConvert from 'cloudconvert';
 import crypto from 'crypto';
-import db from './db.js';                  // ajuste o caminho se seu db.js estiver em outro lugar
-import { r2 } from './r2Client.js';
-import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import db from './db.js';
+import { r2GetSignedUrl, r2PutObject } from './routes/r2Client.js';
 
-const { R2_BUCKET, R2_ACCOUNT_ID, R2_ENDPOINT, CLOUDCONVERT_API_KEY, R2_PREVIEWS_PREFIX } = process.env;
+const { CLOUDCONVERT_API_KEY, R2_PREVIEWS_PREFIX } = process.env;
 
 // prefixo onde salvaremos os PNGs no R2
 function previewsPrefix() {
@@ -16,39 +14,21 @@ function previewsPrefix() {
 
 // URL de download temporária (GET) para um objeto do R2
 async function presignGet(objectKey, expiresSeconds = 900) {
-  if (!R2_BUCKET) throw new Error('R2_BUCKET não configurado');
-  const cmd = new GetObjectCommand({
-    Bucket: R2_BUCKET,
-    Key: objectKey,
-  });
-  return getSignedUrl(r2, cmd, { expiresIn: expiresSeconds });
+  return r2GetSignedUrl('GET', objectKey, expiresSeconds);
 }
 
 // Upload de buffer para o R2 (PNG)
 async function uploadToR2(objectKey, buffer, contentType = 'image/png') {
-  if (!R2_BUCKET) throw new Error('R2_BUCKET não configurado');
-  const cmd = new PutObjectCommand({
-    Bucket: R2_BUCKET,
-    Key: objectKey,
-    Body: buffer,
-    ContentType: contentType,
-    ContentLength: buffer.length,
-  });
-  await r2.send(cmd);
+  await r2PutObject(objectKey, buffer, contentType);
 }
 
 /**
  * Dispara a conversão de um CDR -> PNG via CloudConvert
- * Fluxo:
- *  - gera URL assinada (GET) do CDR no R2
- *  - cria job no CloudConvert (import -> convert -> export)
- *  - baixa o PNG gerado
- *  - faz upload para o R2 em previews/<ordemId>/<itemId>/<hash>.png
- *  - marca o item como 'ready' (ou 'failed')
- *
- * Requer:
- *  - CLOUDCONVERT_API_KEY (env)
- *  - R2_BUCKET (env)
+ * - gera URL assinada (GET) do CDR no R2
+ * - cria job no CloudConvert (import -> convert -> export)
+ * - baixa o PNG gerado
+ * - sobe no R2 em previews/<ordemId>/<itemId>/<hash>.png
+ * - marca o item como 'ready' | 'failed'
  */
 export async function startPreviewGeneration({ ordemId, itemId, cdrObjectKey }) {
   if (!CLOUDCONVERT_API_KEY) throw new Error('CLOUDCONVERT_API_KEY não configurada');
@@ -80,8 +60,7 @@ export async function startPreviewGeneration({ ordemId, itemId, cdrObjectKey }) 
           operation: 'convert',
           input: 'import_cdr',
           output_format: 'png',
-          // parâmetros do CloudConvert (ajuste conforme necessidade)
-          // ex.: dpi, density, background, etc. Se precisar, adicionamos aqui depois.
+          // parâmetros adicionais podem ser ajustados depois (dpi, background, etc.)
         },
         export_png: {
           operation: 'export/url',
@@ -110,7 +89,12 @@ export async function startPreviewGeneration({ ordemId, itemId, cdrObjectKey }) 
     const buffer = Buffer.from(await resp.arrayBuffer());
 
     // 6) Envia o PNG ao R2
-    const hash = crypto.createHash('md5').update(String(Date.now()) + (file.filename || '')).digest('hex').slice(0, 10);
+    const hash = crypto
+      .createHash('md5')
+      .update(String(Date.now()) + (file.filename || ''))
+      .digest('hex')
+      .slice(0, 10);
+
     const pngKey = `${previewsPrefix()}/${ordemId}/${itemId}/${hash}.png`;
     await uploadToR2(pngKey, buffer, 'image/png');
 
@@ -132,7 +116,7 @@ export async function startPreviewGeneration({ ordemId, itemId, cdrObjectKey }) 
               preview_error = $2,
               preview_updated_at = NOW()
         WHERE id = $1`,
-      [itemId, String(err?.message || err) ]
+      [itemId, String(err?.message || err)]
     );
     console.error('[cloudconvert] erro ao gerar preview:', err);
   }
