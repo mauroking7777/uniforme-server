@@ -1,3 +1,4 @@
+// routes/ordemItemArquivoRouter.js
 import express from 'express';
 import path from 'node:path';
 import crypto from 'crypto';
@@ -60,6 +61,20 @@ function onlyCDR(nome, contentType) {
   return okExt && allowed.has(type);
 }
 
+function onlyImage(nome, contentType) {
+  const ext = String(nome || '').toLowerCase().split('.').pop();
+  const okExt = ['png','jpg','jpeg'].includes(ext);
+  const type = String(contentType || '').toLowerCase();
+  const allowed = new Set(['image/png','image/jpeg','image/jpg']);
+  return okExt && allowed.has(type);
+}
+
+function buildPreviewKey(ordemId, itemId, originalName) {
+  const base = sanitizeFileName((originalName || 'preview').replace(/\.(png|jpg|jpeg)$/i, ''));
+  const ext = (originalName || '').toLowerCase().endsWith('.png') ? 'png' : 'jpg';
+  return `previews/${ordemId}/${itemId}/${Date.now()}_${crypto.randomUUID()}_${base}.${ext}`;
+}
+
 function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
   return `ordens/${ordemId}/itens/${itemId}/corel/${Date.now()}_${crypto.randomUUID()}_${base}.cdr`;
@@ -78,13 +93,106 @@ async function assertItemDaOrdem(ordemId, itemId) {
   return q.rowCount > 0;
 }
 
+// assina GET do R2
+async function presignGet(objectKey, seconds = 900, contentType) {
+  return getSignedUrl(
+    r2,
+    new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: objectKey,
+      ...(contentType ? { ResponseContentType: contentType } : {}),
+    }),
+    { expiresIn: seconds }
+  );
+}
+
 /* =========================================================
- * 1) UPLOAD DIRETO do CDR (+ lista JSON opcional)
+ * PREVIEW (PNG/JPG) — upload direto pelo front (presign)
  * ========================================================= */
+
+// 1) Gera URL de PUT no R2
+router.post('/:ordemId/itens/:itemId/preview/upload-url', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { nome_arquivo, content_type, tamanho_bytes } = req.body || {};
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!nome_arquivo || !content_type || !Number.isFinite(Number(tamanho_bytes))) {
+      return res.status(400).json({ erro: 'Parâmetros inválidos.' });
+    }
+    if (!onlyImage(nome_arquivo, content_type)) {
+      return res.status(415).json({ erro: 'Apenas PNG ou JPG/JPEG.' });
+    }
+
+    const Key = buildPreviewKey(ordemId, itemId, nome_arquivo);
+    const cmd = new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: Key,
+      ContentType: content_type,
+      ContentLength: Number(tamanho_bytes),
+      CacheControl: 'public, max-age=31536000, immutable'
+    });
+    const uploadUrl = await getSignedUrl(r2, cmd, { expiresIn: 15 * 60 });
+
+    // deixa status "pending" até o confirm
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+         SET preview_status = 'pending',
+             preview_error = NULL,
+             preview_updated_at = NOW()
+       WHERE id = $1`,
+      [itemId]
+    );
+
+    return res.json({ objectKey: Key, uploadUrl, expiresInSec: 900 });
+  } catch (e) {
+    console.error('preview upload-url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao gerar URL de upload de preview.' });
+  }
+});
+
+// 2) Confirma o preview após o PUT no R2
+router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { objectKey } = req.body || {};
+    if (!objectKey) return res.status(400).json({ erro: 'objectKey ausente.' });
+    if (!String(objectKey).startsWith(`previews/${ordemId}/${itemId}/`)) {
+      return res.status(400).json({ erro: 'objectKey não confere com ordem/item.' });
+    }
+
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+         SET preview_status = 'ready',
+             preview_object_key = $2,
+             preview_error = NULL,
+             preview_updated_at = NOW()
+       WHERE id = $1`,
+      [itemId, objectKey]
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('preview confirm erro:', e);
+    return res.status(500).json({ erro: 'Falha ao confirmar preview.' });
+  }
+});
+
+/* =========================================================
+ * CDR (upload via multipart OU via presigned PUT)
+ * ========================================================= */
+
+// 3) Upload direto do CDR (multipart) — agora aceita CDR + lista + PNG
 router.post(
   '/:ordemId/itens/:itemId/cdr/upload',
   requireAuth,
-  upload.fields([{ name: 'file', maxCount: 1 }, { name: 'lista_nomes', maxCount: 1 }]),
+  upload.fields([
+    { name: 'file', maxCount: 1 },         // CDR (obrigatório)
+    { name: 'lista_nomes', maxCount: 1 },  // JSON (opcional)
+    { name: 'preview_png', maxCount: 1 },  // PNG/JPG (opcional)  ✅ NOVO
+  ]),
   async (req, res) => {
     try {
       const { ordemId, itemId } = req.params;
@@ -93,6 +201,7 @@ router.post(
         return res.status(400).json({ error: 'Item não pertence à ordem informada.' });
       }
 
+      // === CDR (obrigatório)
       const cdr = (req.files?.file || [])[0];
       if (!cdr) {
         return res.status(400).json({ error: 'Arquivo (.cdr) é obrigatório (campo "file").' });
@@ -105,7 +214,6 @@ router.post(
         return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
       }
 
-      // sobe o CDR
       const keyCdr = buildKey(ordemId, itemId, cdr.originalname);
       await r2.send(new PutObjectCommand({
         Bucket: R2_BUCKET,
@@ -142,7 +250,7 @@ router.post(
         ]
       );
 
-      // ---- lista (opcional)
+      // === LISTA DE NOMES (opcional)
       let listaSaved = null;
       const lista = (req.files?.lista_nomes || [])[0];
       if (lista) {
@@ -182,10 +290,47 @@ router.post(
         listaSaved = { id: insLista.rows[0].id, key: keyLista };
       }
 
+      // === PREVIEW PNG/JPG (opcional)  ✅ NOVO
+      let previewSaved = null;
+      const png = (req.files?.preview_png || [])[0];
+      if (png) {
+        if (!onlyImage(png.originalname, png.mimetype)) {
+          return res.status(415).json({ error: 'preview_png: somente PNG ou JPG/JPEG.' });
+        }
+
+        const keyPreview = buildPreviewKey(ordemId, itemId, png.originalname);
+        await r2.send(new PutObjectCommand({
+          Bucket: R2_BUCKET,
+          Key: keyPreview,
+          Body: png.buffer,
+          ContentType: png.mimetype || 'image/png',
+          ContentLength: png.size,
+          CacheControl: 'public, max-age=31536000, immutable',
+        }));
+
+        // Atualiza status/ponteiro do preview no item
+        await db.query(
+          `UPDATE ordem_producao_uniformes_dados_modelo
+              SET preview_status = 'ready',
+                  preview_object_key = $2,
+                  preview_error = NULL,
+                  preview_updated_at = NOW()
+            WHERE id = $1`,
+          [itemId, keyPreview]
+        );
+
+        previewSaved = {
+          key: keyPreview,
+          content_type: png.mimetype || 'image/png',
+          tamanho_bytes: png.size,
+        };
+      }
+
       return res.json({
         ok: true,
         cdr: { id: insCdr.rows[0].id, key: keyCdr },
         lista: listaSaved,
+        preview: previewSaved, // ✅ presente quando PNG/JPG enviado
       });
     } catch (e) {
       console.error('Erro no upload .cdr:', e);
@@ -201,50 +346,66 @@ router.post(
   }
 );
 
-/* =========================================================
- * 1b) UPLOAD/ATUALIZA a LISTA DE NOMES (JSON)
- * ========================================================= */
-router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res) => {
+// 4) Presigned PUT para CDR (front faz o PUT) – inalterado
+router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
-    const { lista, modelo_codigo } = req.body || {};
+    const { nome_arquivo, content_type, tamanho_bytes } = req.body || {};
 
     if (!(await assertItemDaOrdem(ordemId, itemId))) {
       return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
     }
-    if (!Array.isArray(lista) || lista.length === 0) {
-      return res.status(400).json({ erro: 'Campo "lista" precisa ser um array não vazio.' });
+    if (!nome_arquivo || !content_type || !Number.isFinite(Number(tamanho_bytes))) {
+      return res.status(400).json({ erro: 'Parâmetros inválidos.' });
+    }
+    if (!onlyCDR(nome_arquivo, content_type)) {
+      return res.status(415).json({ erro: 'Apenas arquivos .cdr são aceitos.' });
+    }
+    if (Number(tamanho_bytes) > CDR_MAX_BYTES) {
+      return res.status(413).json({ erro: `Arquivo acima de ${CDR_MAX_MB} MB.` });
     }
 
-    const payload = {
-      modelo_codigo: modelo_codigo || null,
-      gerado_em: new Date().toISOString(),
-      itens: lista.map((r) => ({
-        nome: (r?.nome || '').trim(),
-        numero: r?.numero ? String(r.numero).trim() : null,
-        tamanho: r?.tamanho ? String(r.tamanho).trim() : null,
-      })),
-    };
-
-    const bodyStr = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
-    const key = buildListKey(ordemId, itemId);
-
-    await r2.send(new PutObjectCommand({
+    const Key = buildKey(ordemId, itemId, nome_arquivo);
+    const cmd = new PutObjectCommand({
       Bucket: R2_BUCKET,
-      Key: key,
-      Body: bodyStr,
-      ContentType: 'application/json; charset=utf-8',
-      ContentLength: bodyStr.length,
-    }));
+      Key,
+      ContentType: content_type,
+      ContentLength: Number(tamanho_bytes),
+    });
+    const uploadUrl = await getSignedUrl(r2, cmd, { expiresIn: 15 * 60 });
 
-    // soft-delete de listas anteriores
+    return res.json({ objectKey: Key, uploadUrl, expiresInSec: 900 });
+  } catch (e) {
+    console.error('upload-url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao gerar URL de upload.' });
+  }
+});
+
+// 5) Confirma o CDR após o PUT (registra no BD) – inalterado
+router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { objectKey, nome_original, content_type, tamanho_bytes } = req.body || {};
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!objectKey || !/\.cdr$/i.test(objectKey)) {
+      return res.status(400).json({ erro: 'objectKey inválido (precisa ser um .cdr).' });
+    }
+    if (!String(objectKey).includes(`/ordens/${ordemId}/itens/${itemId}/`)) {
+      return res.status(400).json({ erro: 'objectKey não confere com a ordem/item.' });
+    }
+
+    // Desativa CDRs anteriores deste item
     await db.query(
       `UPDATE ordem_item_arquivo
          SET deleted_at = NOW()
-       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/listas/%'`,
+       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
       [itemId]
     );
 
+    // Registra o novo arquivo
     const { rows } = await db.query(
       `INSERT INTO ordem_item_arquivo
          (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
@@ -253,24 +414,27 @@ router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res)
       [
         ordemId,
         itemId,
-        key,
-        'lista-nomes.json',
-        'application/json',
-        bodyStr.length,
+        objectKey,
+        nome_original || 'layout.cdr',
+        content_type || 'application/octet-stream',
+        Number(tamanho_bytes) || null,
         req.user?.id || null,
       ]
     );
 
-    return res.json({ ok: true, arquivo: rows[0] });
+    // (sem CloudConvert / sem tocar preview aqui)
+    res.json({ ok: true, arquivo: rows[0] });
   } catch (e) {
-    console.error('upload lista-nomes erro:', e);
-    return res.status(500).json({ erro: 'Falha ao salvar a lista de nomes.' });
+    console.error('cdr/confirm erro:', e);
+    res.status(500).json({ erro: 'Falha ao registrar arquivo' });
   }
 });
 
 /* =========================================================
- * 2) LISTAR ARQUIVOS ATIVOS DO ITEM
+ * LISTAGEM / DOWNLOAD / DELETE (inalteradas)
  * ========================================================= */
+
+// 6) Listar arquivos ativos do item
 router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
@@ -297,9 +461,7 @@ router.get('/:ordemId/itens/:itemId/cdr/list', requireAuth, async (req, res) => 
   }
 });
 
-/* =========================================================
- * 3a) URL do CDR mais recente
- * ========================================================= */
+// 7) URL do CDR mais recente (download)
 router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
@@ -344,9 +506,7 @@ router.get('/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, 
   }
 });
 
-/* =========================================================
- * 3b) URL por ID (genérica – CDR/JSON)
- * ========================================================= */
+// 8) URL genérica por ID (CDR/JSON)
 router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
   try {
     const { arquivoId } = req.params;
@@ -377,9 +537,7 @@ router.get('/arquivos/:arquivoId/url', requireAuth, async (req, res) => {
   }
 });
 
-/* =========================================================
- * 3c) URL da LISTA DE NOMES (JSON) mais recente
- * ========================================================= */
+// 9) URL da LISTA DE NOMES mais recente
 router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
@@ -423,9 +581,7 @@ router.get('/:ordemId/itens/:itemId/lista-nomes/url', requireAuth, async (req, r
   }
 });
 
-/* =========================================================
- * 4) DELETE (soft + tenta remover do R2)
- * ========================================================= */
+// 10) DELETE (soft + tenta remover do R2)
 router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
   const client = await db.connect();
   try {
@@ -453,93 +609,6 @@ router.delete('/arquivos/:arquivoId', requireAuth, async (req, res) => {
     res.status(500).json({ erro: 'Falha ao excluir arquivo' });
   } finally {
     client.release();
-  }
-});
-
-/* =========================================================
- * 5) Presigned PUT para upload direto do front
- * ========================================================= */
-router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
-  try {
-    const { ordemId, itemId } = req.params;
-    const { nome_arquivo, content_type, tamanho_bytes } = req.body || {};
-
-    if (!(await assertItemDaOrdem(ordemId, itemId))) {
-      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
-    }
-    if (!nome_arquivo || !content_type || !Number.isFinite(Number(tamanho_bytes))) {
-      return res.status(400).json({ erro: 'Parâmetros inválidos.' });
-    }
-    if (!onlyCDR(nome_arquivo, content_type)) {
-      return res.status(415).json({ erro: 'Apenas arquivos .cdr são aceitos.' });
-    }
-    if (Number(tamanho_bytes) > CDR_MAX_BYTES) {
-      return res.status(413).json({ erro: `Arquivo acima de ${CDR_MAX_MB} MB.` });
-    }
-
-    const Key = buildKey(ordemId, itemId, nome_arquivo);
-    const cmd = new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key,
-      ContentType: content_type,
-      ContentLength: Number(tamanho_bytes),
-    });
-    const uploadUrl = await getSignedUrl(r2, cmd, { expiresIn: 15 * 60 });
-
-    return res.json({ objectKey: Key, uploadUrl, expiresInSec: 900 });
-  } catch (e) {
-    console.error('upload-url erro:', e);
-    return res.status(500).json({ erro: 'Falha ao gerar URL de upload.' });
-  }
-});
-
-/* =========================================================
- * 6) Confirmar upload direto (registrar no BD)
- * ========================================================= */
-router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res) => {
-  try {
-    const { ordemId, itemId } = req.params;
-    const { objectKey, nome_original, content_type, tamanho_bytes } = req.body || {};
-
-    if (!(await assertItemDaOrdem(ordemId, itemId))) {
-      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
-    }
-    if (!objectKey || !/\.cdr$/i.test(objectKey)) {
-      return res.status(400).json({ erro: 'objectKey inválido (precisa ser um .cdr).' });
-    }
-    if (!String(objectKey).includes(`/ordens/${ordemId}/itens/${itemId}/`)) {
-      return res.status(400).json({ erro: 'objectKey não confere com a ordem/item.' });
-    }
-
-    // Desativa CDRs anteriores deste item
-    await db.query(
-      `UPDATE ordem_item_arquivo
-         SET deleted_at = NOW()
-       WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
-      [itemId]
-    );
-
-    // Registra o novo arquivo
-    const { rows } = await db.query(
-      `INSERT INTO ordem_item_arquivo
-         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
-       RETURNING id, key, created_at`,
-      [
-        ordemId,
-        itemId,
-        objectKey,
-        nome_original || 'layout.cdr',
-        content_type || 'application/octet-stream',
-        Number(tamanho_bytes) || null,
-        req.user?.id || null,
-      ]
-    );
-
-    res.json({ ok: true, arquivo: rows[0] });
-  } catch (e) {
-    console.error('cdr/confirm erro:', e);
-    res.status(500).json({ erro: 'Falha ao registrar arquivo' });
   }
 });
 
