@@ -214,29 +214,30 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
 
 /**
  * DELETE /ordens-uniformes/modelos/:id
- * Exclui: arquivos do R2, registros de arquivos e o item do modelo.
+ * Exclui arquivos do R2, registros de arquivos e o item do modelo.
  */
  router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
 
   try {
     // 1) Buscar todos os arquivos vinculados a este item
-    const arqs = await db.query(
+    const { rows: arquivos } = await db.query(
       'SELECT id, object_key FROM ordem_item_arquivo WHERE ordem_item_id = $1',
       [id]
     );
-    const arquivos = arqs.rows || [];
 
-    // 2) Remover do R2 (tentar todos; erros são logados e seguimos)
-    for (const a of arquivos) {
-      if (a?.object_key) {
-        try {
-          await r2DeleteObject(a.object_key);
-        } catch (e) {
-          console.error('[DELETE item] Falha ao remover do R2:', a.object_key, e?.message || e);
+    // 2) Remover do R2 (tenta todos; se algum falhar, loga e segue)
+    await Promise.all(
+      (arquivos || []).map(async (a) => {
+        if (a?.object_key) {
+          try {
+            await r2DeleteObject(a.object_key);
+          } catch (e) {
+            console.error('[DELETE item] Falha ao remover do R2:', a.object_key, e?.message || e);
+          }
         }
-      }
-    }
+      })
+    );
 
     // 3) Remover registros de arquivos desse item
     await db.query('DELETE FROM ordem_item_arquivo WHERE ordem_item_id = $1', [id]);
