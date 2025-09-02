@@ -1,5 +1,7 @@
 import express from 'express';
 import db from '../db.js';
+import { r2DeleteObject } from './r2Client.js';
+
 
 const router = express.Router();
 
@@ -212,17 +214,49 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
 
 /**
  * DELETE /ordens-uniformes/modelos/:id
+ * Exclui: arquivos do R2, registros de arquivos e o item do modelo.
  */
-router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
+ router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
+
   try {
-    const r = await db.query('DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1', [id]);
-    if (r.rowCount === 0) return res.status(404).json({ erro: 'Modelo não encontrado.' });
-    res.status(204).send();
+    // 1) Buscar todos os arquivos vinculados a este item
+    const arqs = await db.query(
+      'SELECT id, object_key FROM ordem_item_arquivo WHERE ordem_item_id = $1',
+      [id]
+    );
+    const arquivos = arqs.rows || [];
+
+    // 2) Remover do R2 (tentar todos; erros são logados e seguimos)
+    for (const a of arquivos) {
+      if (a?.object_key) {
+        try {
+          await r2DeleteObject(a.object_key);
+        } catch (e) {
+          console.error('[DELETE item] Falha ao remover do R2:', a.object_key, e?.message || e);
+        }
+      }
+    }
+
+    // 3) Remover registros de arquivos desse item
+    await db.query('DELETE FROM ordem_item_arquivo WHERE ordem_item_id = $1', [id]);
+
+    // 4) Remover o item do modelo
+    const r = await db.query(
+      'DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
+      [id]
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ erro: 'Modelo não encontrado.' });
+    }
+
+    // 5) OK
+    return res.status(204).send();
   } catch (err) {
-    console.error('Erro ao excluir modelo:', err);
-    res.status(500).json({ erro: 'Erro ao excluir modelo.' });
+    console.error('Erro ao excluir modelo (e arquivos):', err);
+    return res.status(500).json({ erro: 'Erro ao excluir modelo.' });
   }
 });
+
 
 export default router;
