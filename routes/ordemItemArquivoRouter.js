@@ -72,8 +72,10 @@ function onlyImage(nome, contentType) {
 function buildPreviewKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'preview').replace(/\.(png|jpg|jpeg)$/i, ''));
   const ext = (originalName || '').toLowerCase().endsWith('.png') ? 'png' : 'jpg';
-  return `previews/${ordemId}/${itemId}/${Date.now()}_${crypto.randomUUID()}_${base}.${ext}`;
+  // agora fica JUNTO com CDR e lista
+  return `ordens/${ordemId}/itens/${itemId}/previews/${Date.now()}_${crypto.randomUUID()}_${base}.${ext}`;
 }
+
 
 function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
@@ -159,9 +161,10 @@ router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, 
     const { ordemId, itemId } = req.params;
     const { objectKey } = req.body || {};
     if (!objectKey) return res.status(400).json({ erro: 'objectKey ausente.' });
-    if (!String(objectKey).startsWith(`previews/${ordemId}/${itemId}/`)) {
+    if (!String(objectKey).startsWith(`ordens/${ordemId}/itens/${itemId}/previews/`)) {
       return res.status(400).json({ erro: 'objectKey não confere com ordem/item.' });
     }
+    
 
     await db.query(
       `UPDATE ordem_producao_uniformes_dados_modelo
