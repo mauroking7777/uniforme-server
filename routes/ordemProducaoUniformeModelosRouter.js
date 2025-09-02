@@ -214,35 +214,47 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
 
 /**
  * DELETE /ordens-uniformes/modelos/:id
- * Exclui arquivos do R2, registros de arquivos e o item do modelo.
+ * Exclui arquivos do R2 (CDR, lista, preview), registros de arquivos e o item do modelo.
  */
  router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
 
   try {
-    // 1) Buscar todos os arquivos vinculados a este item
+    // 1) Buscar todos os arquivos CDR/lista vinculados a este item
     const { rows: arquivos } = await db.query(
       'SELECT id, key FROM ordem_item_arquivo WHERE item_id = $1',
       [id]
     );
 
-    // 2) Remover do R2 (tenta todos; se algum falhar, apenas loga e continua)
+    // 2) Buscar preview vinculado ao item
+    const { rows: previewRows } = await db.query(
+      'SELECT preview_object_key FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
+      [id]
+    );
+    const previewKey = previewRows[0]?.preview_object_key;
+
+    // 3) Remover do R2 (tenta todos; se falhar, loga e continua)
+    const chavesParaExcluir = [
+      ...arquivos.map(a => a.key),
+      ...(previewKey ? [previewKey] : []),
+    ];
+
     await Promise.all(
-      (arquivos || []).map(async (a) => {
-        if (a?.key) {
+      chavesParaExcluir.map(async (key) => {
+        if (key) {
           try {
-            await r2DeleteObject(a.key);
+            await r2DeleteObject(key);
           } catch (e) {
-            console.error('[DELETE item] Falha ao remover do R2:', a.key, e?.message || e);
+            console.error('[DELETE item] Falha ao remover do R2:', key, e?.message || e);
           }
         }
       })
     );
 
-    // 3) Remover registros de arquivos desse item
+    // 4) Remover registros de arquivos desse item
     await db.query('DELETE FROM ordem_item_arquivo WHERE item_id = $1', [id]);
 
-    // 4) Remover o item do modelo
+    // 5) Remover o item do modelo
     const r = await db.query(
       'DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
       [id]
@@ -251,13 +263,14 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
       return res.status(404).json({ erro: 'Modelo não encontrado.' });
     }
 
-    // 5) OK
+    // 6) OK
     return res.status(204).send();
   } catch (err) {
     console.error('Erro ao excluir modelo (e arquivos):', err?.message || err);
     return res.status(500).json({ erro: 'Erro ao excluir modelo.' });
   }
 });
+
 
 
 
