@@ -222,25 +222,25 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
   try {
     // 1) Buscar todos os arquivos vinculados a este item
     const { rows: arquivos } = await db.query(
-      'SELECT id, object_key FROM ordem_item_arquivo WHERE ordem_item_id = $1',
+      'SELECT id, key FROM ordem_item_arquivo WHERE item_id = $1',
       [id]
     );
 
-    // 2) Remover do R2 (tenta todos; se algum falhar, loga e segue)
+    // 2) Remover do R2 (tenta todos; se algum falhar, apenas loga e continua)
     await Promise.all(
       (arquivos || []).map(async (a) => {
-        if (a?.object_key) {
+        if (a?.key) {
           try {
-            await r2DeleteObject(a.object_key);
+            await r2DeleteObject(a.key);
           } catch (e) {
-            console.error('[DELETE item] Falha ao remover do R2:', a.object_key, e?.message || e);
+            console.error('[DELETE item] Falha ao remover do R2:', a.key, e?.message || e);
           }
         }
       })
     );
 
     // 3) Remover registros de arquivos desse item
-    await db.query('DELETE FROM ordem_item_arquivo WHERE ordem_item_id = $1', [id]);
+    await db.query('DELETE FROM ordem_item_arquivo WHERE item_id = $1', [id]);
 
     // 4) Remover o item do modelo
     const r = await db.query(
@@ -254,10 +254,11 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
     // 5) OK
     return res.status(204).send();
   } catch (err) {
-    console.error('Erro ao excluir modelo (e arquivos):', err);
+    console.error('Erro ao excluir modelo (e arquivos):', err?.message || err);
     return res.status(500).json({ erro: 'Erro ao excluir modelo.' });
   }
 });
+
 
 
 export default router;
