@@ -276,7 +276,10 @@ router.put('/ordens-uniformes/:id', async (req, res) => {
   try {
     // 1) Número único
     if (await numeroOrdemDuplicado(numeroTrim, id)) {
-      return res.status(409).json({ erro: `Já existe outra ordem com o número "${numeroTrim}".` });
+      return res.status(409).json({
+        erro: 'Já existe uma ordem de produção com esse número. Informe um número diferente para prosseguir.'
+      });
+      
     }
 
     // 2) Se for fechar/enviar, validar grade × lista (por item com lista)
@@ -315,7 +318,9 @@ router.put('/ordens-uniformes/:id', async (req, res) => {
   } catch (err) {
     console.error('Erro ao atualizar ordem:', err);
     if (String(err?.code) === '23505') {
-      return res.status(409).json({ erro: `Já existe outra ordem com o número "${numeroTrim}".` });
+      return res.status(409).json({
+        erro: 'Já existe uma ordem de produção com esse número. Informe um número diferente para prosseguir.'
+      });
     }
     const code = err?.status || 500;
     return res.status(code).json({ erro: err?.message || 'Erro ao atualizar ordem.' });
