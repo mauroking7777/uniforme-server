@@ -134,6 +134,79 @@ router.get('/ordens-uniformes/modelos/:id', async (req, res) => {
 });
 
 /**
+ * GET /ordens-uniformes/modelos/:id/tamanhos
+ * Retorna os tamanhos/quantidades do item (modelo) já salvos.
+ */
+router.get('/ordens-uniformes/modelos/:id/tamanhos', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const sql = `
+      SELECT ti.id,
+             ti.modelo_id,
+             ti.tamanho_id,
+             ti.quantidade,
+             tg.tamanho AS nome_tamanho
+        FROM ordem_producao_uniformes_tamanhos_item ti
+   LEFT JOIN tamanhos_grade tg ON tg.id = ti.tamanho_id
+       WHERE ti.modelo_id = $1
+    ORDER BY tg.ordem_exibicao NULLS LAST, tg.tamanho;
+    `;
+    const { rows } = await db.query(sql, [id]);
+    return res.json(rows);
+  } catch (err) {
+    console.error('Erro ao buscar tamanhos do item:', err);
+    return res.status(500).json({ erro: 'Erro ao buscar tamanhos do item.' });
+  }
+});
+
+/**
+ * POST /ordens-uniformes/modelos/:id/tamanhos/bulk
+ * Substitui as quantidades do item pelos itens enviados.
+ * Body: { itens: [{ tamanho_id:number, quantidade:number }, ...] }
+ */
+router.post('/ordens-uniformes/modelos/:id/tamanhos/bulk', async (req, res) => {
+  const { id } = req.params;
+  const { itens } = req.body || {};
+  if (!Array.isArray(itens)) {
+    return res.status(400).json({ erro: 'Envie itens como array.' });
+  }
+
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // limpa tudo do item
+    await client.query(
+      'DELETE FROM ordem_producao_uniformes_tamanhos_item WHERE modelo_id = $1',
+      [id]
+    );
+
+    // insere novamente apenas > 0
+    for (const it of itens) {
+      const tamanhoId = parseInt(it?.tamanho_id, 10);
+      const qtd = parseInt(it?.quantidade, 10);
+      if (!Number.isFinite(tamanhoId) || !Number.isFinite(qtd) || qtd <= 0) continue;
+
+      await client.query(
+        `INSERT INTO ordem_producao_uniformes_tamanhos_item
+           (modelo_id, tamanho_id, quantidade)
+         VALUES ($1, $2, $3)`,
+        [id, tamanhoId, qtd]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Erro no bulk de tamanhos:', err);
+    return res.status(500).json({ erro: 'Erro ao salvar tamanhos.' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
  * PUT /ordens-uniformes/modelos/:id
  */
 router.put('/ordens-uniformes/modelos/:id', async (req, res) => {

@@ -50,7 +50,7 @@ async function carregarMapaGradePorItem(ordemId) {
     const itemId = r.item_id;
     if (!mapa.has(itemId)) mapa.set(itemId, new Map());
     const m = mapa.get(itemId);
-    const key = String(r.tamanho || '').trim();
+    const key = String(r.tamanho || '').trim().toUpperCase();
     m.set(key, (m.get(key) || 0) + (parseInt(r.quantidade, 10) || 0));
   }
   return mapa;
@@ -60,15 +60,17 @@ async function carregarMapaGradePorItem(ordemId) {
 async function carregarMapaListaPorItem(ordemId) {
   // pega o último JSON (lista) de cada item
   const { rows } = await db.query(`
-    SELECT a.item_id,
-           a.key AS object_key,
-           a.nome_original,
-           a.content_type
-      FROM ordem_item_arquivo a
-     WHERE a.ordem_id = $1
-       AND (LOWER(a.nome_original) LIKE '%lista-nomes%' OR a.content_type = 'application/json')
-  ORDER BY a.item_id, a.id DESC
-  `, [ordemId]);
+  SELECT a.item_id,
+         a.key AS object_key,
+         a.nome_original,
+         a.content_type
+    FROM ordem_item_arquivo a
+   WHERE a.ordem_id = $1
+     AND a.deleted_at IS NULL
+     AND (LOWER(a.nome_original) LIKE '%lista-nomes%' OR a.content_type = 'application/json')
+ORDER BY a.item_id, a.id DESC
+`, [ordemId]);
+
 
   const porItem = new Map(); // item_id -> object_key
   for (const r of rows) {
@@ -81,7 +83,7 @@ async function carregarMapaListaPorItem(ordemId) {
     const lista = Array.isArray(json?.lista) ? json.lista : [];
     const m = new Map();
     for (const l of lista) {
-      const t = String(l?.tamanho || '').trim();
+      const t = String(l?.tamanho || '').trim().toUpperCase();
       if (!t) continue;
       m.set(t, (m.get(t) || 0) + 1);
     }
