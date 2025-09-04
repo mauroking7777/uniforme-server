@@ -149,7 +149,9 @@ router.post('/ordens-uniformes', async (req, res) => {
   try {
     // Bloqueia duplicidade
     if (await numeroOrdemDuplicado(numero_ordem)) {
-      return res.status(409).json({ erro: `Já existe ordem com o número "${numero_ordem}".` });
+      return res.status(409).json({
+        erro: 'Já existe uma ordem de produção com esse número. Informe um número diferente para prosseguir.'
+      });
     }
 
     const nova = await db.query(
