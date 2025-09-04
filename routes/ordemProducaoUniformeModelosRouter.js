@@ -1,7 +1,7 @@
+// routes/ordemProducaoUniformeModelosRouter.js
 import express from 'express';
 import db from '../db.js';
 import { r2DeleteObject } from './r2Client.js';
-
 
 const router = express.Router();
 
@@ -121,7 +121,10 @@ router.get('/ordens-uniformes/:ordemId/modelos', async (req, res) => {
 router.get('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
   try {
-    const r = await db.query(`SELECT * FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`, [id]);
+    const r = await db.query(
+      `SELECT * FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`,
+      [id]
+    );
     if (r.rows.length === 0) return res.status(404).json({ erro: 'Modelo não encontrado.' });
     res.json(r.rows[0]);
   } catch (err) {
@@ -215,48 +218,59 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
 /**
  * DELETE /ordens-uniformes/modelos/:id
  * Exclui arquivos do R2 (CDR, lista, preview), registros de arquivos e o item do modelo.
+ *
+ * Observações:
+ * - Usa as colunas `item_id` e `key` na tabela `ordem_item_arquivo` (seu schema atual).
+ * - O preview é lido do campo `preview_object_key` na própria tabela do item (se existir).
  */
- router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
+router.delete('/ordens-uniformes/modelos/:id', async (req, res) => {
   const { id } = req.params;
 
   try {
-    // 1) Buscar todos os arquivos CDR/lista vinculados a este item
+    // 1) Buscar ARQUIVOS (CDR, lista, etc.) vinculados a este item (schema atual)
     const { rows: arquivos } = await db.query(
-      'SELECT id, key FROM ordem_item_arquivo WHERE item_id = $1',
+      `SELECT id, key AS object_key
+         FROM ordem_item_arquivo
+        WHERE item_id = $1`,
       [id]
     );
 
-    // 2) Buscar preview vinculado ao item
-    const { rows: previewRows } = await db.query(
-      'SELECT preview_object_key FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
-      [id]
-    );
-    const previewKey = previewRows[0]?.preview_object_key;
+    // 2) Buscar preview vinculado ao item (se a coluna existir)
+    let previewKey = null;
+    try {
+      const { rows: prev } = await db.query(
+        `SELECT preview_object_key
+           FROM ordem_producao_uniformes_dados_modelo
+          WHERE id = $1`,
+        [id]
+      );
+      previewKey = prev[0]?.preview_object_key || null;
+    } catch {
+      previewKey = null;
+    }
 
-    // 3) Remover do R2 (tenta todos; se falhar, loga e continua)
+    // 3) Remover do R2 (tenta todos; se falhar algum, loga e segue)
     const chavesParaExcluir = [
-      ...arquivos.map(a => a.key),
+      ...((arquivos || []).map(a => a?.object_key).filter(Boolean)),
       ...(previewKey ? [previewKey] : []),
     ];
 
     await Promise.all(
       chavesParaExcluir.map(async (key) => {
-        if (key) {
-          try {
-            await r2DeleteObject(key);
-          } catch (e) {
-            console.error('[DELETE item] Falha ao remover do R2:', key, e?.message || e);
-          }
+        try {
+          await r2DeleteObject(key);
+        } catch (e) {
+          console.error('[DELETE item] Falha ao remover do R2:', key, e?.message || e);
         }
       })
     );
 
     // 4) Remover registros de arquivos desse item
-    await db.query('DELETE FROM ordem_item_arquivo WHERE item_id = $1', [id]);
+    await db.query(`DELETE FROM ordem_item_arquivo WHERE item_id = $1`, [id]);
 
     // 5) Remover o item do modelo
     const r = await db.query(
-      'DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1',
+      `DELETE FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`,
       [id]
     );
     if (r.rowCount === 0) {
@@ -270,8 +284,5 @@ router.put('/ordens-uniformes/modelos/:id', async (req, res) => {
     return res.status(500).json({ erro: 'Erro ao excluir modelo.' });
   }
 });
-
-
-
 
 export default router;
