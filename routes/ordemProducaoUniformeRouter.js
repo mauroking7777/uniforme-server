@@ -37,7 +37,8 @@ async function readR2ObjectAsJson(objectKey) {
 async function carregarMapaGradePorItem(ordemId) {
   const sql = `
     SELECT m.id AS item_id,
-           COALESCE(tg.tamanho, tg.nome, '') AS tamanho,
+    COALESCE(tg.tamanho, '') AS tamanho,
+
            COALESCE(oti.quantidade, 0) AS quantidade
       FROM ordem_producao_uniformes_dados_modelo m
  LEFT JOIN ordem_producao_uniformes_tamanhos_item oti ON oti.modelo_id = m.id
@@ -110,13 +111,20 @@ async function validarItensVsLista(ordemId) {
     }
   }
   if (divergencias.length > 0) {
-    const msg = divergencias
-      .map(d => `Item ${d.itemId} — ${d.tamanho}: grade=${d.grade} x lista=${d.lista}`)
-      .join('\n');
-    const e = new Error(`Divergência entre grade e lista de nomes:\n${msg}`);
+    const MAX = 10; // mostra no máximo 10 linhas
+    const linhas = divergencias.slice(0, MAX)
+      .map(d => `Item ${d.itemId} — ${d.tamanho}: grade=${d.grade} vs lista=${d.lista}`);
+    const sufixo = divergencias.length > MAX
+      ? `\n(+${divergencias.length - MAX} diferenças adicionais)`
+      : '';
+    const e = new Error(
+      `Não foi possível fechar a ordem: as quantidades por tamanho da grade não conferem com a lista de nomes.\n` +
+      linhas.join('\n') + sufixo
+    );
     e.status = 409;
     throw e;
   }
+  
 }
 
 /* =========================
