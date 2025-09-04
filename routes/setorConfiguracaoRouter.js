@@ -2,6 +2,11 @@
 import express from 'express';
 import pool from '../db.js';
 import { auth as requireAuth } from './auth.js';
+// R2 (Cloudflare) – cliente e assinatura
+import { r2 } from './r2Client.js';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
 
 const router = express.Router();
 
@@ -192,5 +197,103 @@ router.post('/setores/configuracao/ordens/:ordemId/concluir', requireAuth, async
     res.status(500).json({ erro: 'Falha ao concluir a configuração da ordem.' });
   }
 });
+
+/**
+ * GET /ordens/:ordemId/itens/:itemId/cdr/preview-url
+ * Retorna URL ASSINADA para visualizar o preview do layout (imagem no R2).
+ *
+ * Regra:
+ * 1) Tenta ler `preview_object_key` da tabela do item (ordem_producao_uniformes_dados_modelo).
+ * 2) Se não tiver, tenta pegar o último arquivo de imagem do item em `ordem_item_arquivo`.
+ */
+ router.get('/ordens/:ordemId/itens/:itemId/cdr/preview-url', requireAuth, async (req, res) => {
+  const { ordemId, itemId } = req.params;
+  try {
+    // 1) tenta preview_object_key direto do item
+    const q1 = await pool.query(
+      `SELECT preview_object_key
+         FROM ordem_producao_uniformes_dados_modelo
+        WHERE id = $1 AND ordem_id = $2
+        LIMIT 1`,
+      [itemId, ordemId]
+    );
+
+    let objectKey = q1.rows[0]?.preview_object_key || null;
+
+    // 2) fallback: último arquivo de imagem do item
+    if (!objectKey) {
+      const q2 = await pool.query(
+        `SELECT key
+           FROM ordem_item_arquivo
+          WHERE item_id = $1
+            AND (content_type LIKE 'image/%'
+                 OR LOWER(nome_original) LIKE '%.png'
+                 OR LOWER(nome_original) LIKE '%.jpg'
+                 OR LOWER(nome_original) LIKE '%.jpeg'
+                 OR LOWER(nome_original) LIKE '%preview%')
+       ORDER BY id DESC
+          LIMIT 1`,
+        [itemId]
+      );
+      objectKey = q2.rows[0]?.key || null;
+    }
+
+    if (!objectKey) {
+      return res.status(404).json({ erro: 'Preview não encontrado para este item.' });
+    }
+
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: objectKey }),
+      { expiresIn: 60 * 60 } // 1h
+    );
+
+    return res.json({ url });
+  } catch (err) {
+    console.error('preview-url erro:', err);
+    return res.status(500).json({ erro: 'Falha ao gerar URL do preview.' });
+  }
+});
+
+
+/**
+ * GET /ordens/:ordemId/itens/:itemId/cdr/download-url
+ * Retorna URL ASSINADA para baixar o CDR do item (arquivo de layout vetorial).
+ *
+ * Regra:
+ *  - Pega o último arquivo do item com content_type CDR ou nome terminando em .cdr
+ */
+router.get('/ordens/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, res) => {
+  const { ordemId, itemId } = req.params;
+  try {
+    const q = await pool.query(
+      `SELECT key
+         FROM ordem_item_arquivo
+        WHERE item_id = $1
+          AND (content_type = 'application/cdr'
+               OR LOWER(nome_original) LIKE '%.cdr')
+     ORDER BY id DESC
+        LIMIT 1`,
+      [itemId]
+    );
+
+    const objectKey = q.rows[0]?.key || null;
+    if (!objectKey) {
+      return res.status(404).json({ erro: 'Nenhum arquivo CDR encontrado para este item.' });
+    }
+
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: objectKey }),
+      { expiresIn: 60 * 60 } // 1h
+    );
+
+    return res.json({ url });
+  } catch (err) {
+    console.error('download-url erro:', err);
+    return res.status(500).json({ erro: 'Falha ao gerar URL de download do CDR.' });
+  }
+});
+
 
 export default router;
