@@ -121,6 +121,14 @@ router.post('/setores/configuracao/ordens/:ordemId/receber', requireAuth, async 
         WHERE ordem_id = $2 AND setor_id = $3`,
       [req.user?.id || null, os.ordem_id, os.setor_id]
     );
+// vendedor enxerga "ACEITA"
+await pool.query(`
+  UPDATE public.ordem_producao_uniformes_dados_ordem
+     SET status = 'aceita'
+   WHERE id = $1
+`, [req.params.ordemId]);
+
+
 
     res.json({ ok: true, novo_status: 'recebido' });
   } catch (err) {
@@ -134,23 +142,42 @@ router.post('/setores/configuracao/ordens/:ordemId/receber', requireAuth, async 
  *  - Permitido de 'aguardando' ou 'recebido'
  *  - Grava motivo e carimbo de devolução
  */
-router.post('/setores/configuracao/ordens/:ordemId/devolver', requireAuth, async (req, res) => {
+ router.post('/setores/configuracao/ordens/:ordemId/devolver', requireAuth, async (req, res) => {
   const { ordemId } = req.params;
   const { motivo } = req.body || {};
+  const client = await pool.connect();
   try {
     if (!motivo || !String(motivo).trim()) {
+      client.release();
       return res.status(400).json({ erro: 'motivo é obrigatório.' });
     }
 
-    const os = await getStatusConfig(ordemId);
-    if (!os) return res.status(404).json({ erro: 'Ordem sem setor de configuração.' });
+    await client.query('BEGIN');
+
+    // carrega status do vínculo do setor (usando a mesma lógica do getStatusConfig)
+    const osq = await client.query(`
+      SELECT os.*, s.slug
+        FROM public.ordem_setores os
+        JOIN public.setores s ON s.id = os.setor_id
+       WHERE os.ordem_id = $1 AND s.slug = 'configuracao'
+       LIMIT 1
+    `, [Number(ordemId)]);
+    const os = osq.rows[0];
+    if (!os) {
+      await client.query('ROLLBACK');
+      client.release();
+      return res.status(404).json({ erro: 'Ordem sem setor de configuração.' });
+    }
 
     const st = String(os.status).toLowerCase();
     if (!['aguardando','recebido'].includes(st)) {
+      await client.query('ROLLBACK');
+      client.release();
       return res.status(409).json({ erro: `Estado inválido: ${os.status}. Permitidos: aguardando/recebido.` });
     }
 
-    await pool.query(
+    // 1) marca devolvido no vínculo atual
+    await client.query(
       `UPDATE public.ordem_setores
           SET status = 'devolvido',
               devolvido_por = $1,
@@ -160,13 +187,28 @@ router.post('/setores/configuracao/ordens/:ordemId/devolver', requireAuth, async
       [req.user?.id || null, motivo, os.ordem_id, os.setor_id]
     );
 
-    // Observação: quando o vendedor ajustar e ENVIAR novamente, você pode restaurar para 'aguardando' nesse mesmo registro.
+    // 2) status geral para o representante
+    await client.query(
+      `UPDATE public.ordem_producao_uniformes_dados_ordem
+          SET status = 'devolvida'
+        WHERE id = $1`,
+      [os.ordem_id]
+    );
+
+    // 3) remove todos os vínculos com setores (some das filas)
+    await client.query(`DELETE FROM public.ordem_setores WHERE ordem_id = $1`, [os.ordem_id]);
+
+    await client.query('COMMIT');
+    client.release();
     res.json({ ok: true, novo_status: 'devolvido' });
   } catch (err) {
+    try { await client.query('ROLLBACK'); } catch {}
+    client.release();
     console.error('POST devolver (configuração) erro:', err);
     res.status(500).json({ erro: 'Falha ao devolver a ordem no Setor de Configuração.' });
   }
 });
+
 
 /** POST /setores/configuracao/ordens/:ordemId/concluir
  * Regras:
@@ -190,6 +232,14 @@ router.post('/setores/configuracao/ordens/:ordemId/concluir', requireAuth, async
         WHERE ordem_id = $1 AND setor_id = $2`,
       [os.ordem_id, os.setor_id]
     );
+
+    // vendedor enxerga "CONFIGURADO"
+  await pool.query(`
+  UPDATE public.ordem_producao_uniformes_dados_ordem
+    SET status = 'configurado'
+  WHERE id = $1
+  `, [req.params.ordemId]);
+
 
     res.json({ ok: true, novo_status: 'configurado' });
   } catch (err) {
@@ -294,6 +344,57 @@ router.get('/ordens/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async
     return res.status(500).json({ erro: 'Falha ao gerar URL de download do CDR.' });
   }
 });
+
+// Alias 1: /aceitar -> mesma lógica do /receber
+router.post('/setores/configuracao/ordens/:ordemId/aceitar', requireAuth, async (req, res) => {
+  // reaproveita a mesma atualização do /receber
+  // 1) ordem_setores -> 'recebido'
+  await pool.query(`
+    UPDATE public.ordem_setores
+       SET status = 'recebido',
+           recebido_por = $1,
+           recebido_em = NOW()
+     WHERE ordem_id = $2
+       AND setor_id = (SELECT id FROM public.setores WHERE slug='configuracao' LIMIT 1)
+  `, [req.user?.id || null, req.params.ordemId]);
+
+  // 2) status geral -> 'aceita'
+  await pool.query(`
+    UPDATE public.ordem_producao_uniformes_dados_ordem
+       SET status = 'aceita'
+     WHERE id = $1
+  `, [req.params.ordemId]);
+
+  res.json({ ok: true, novo_status: 'recebido' });
+});
+
+// Alias 2: /finalizar -> mesma lógica do /concluir
+router.post('/setores/configuracao/ordens/:ordemId/finalizar', requireAuth, async (req, res) => {
+  // 1) ordem_setores -> 'configurado'
+  await pool.query(`
+    UPDATE public.ordem_setores
+       SET status = 'configurado',
+           concluido_em = NOW()
+     WHERE ordem_id = $1
+       AND setor_id = (SELECT id FROM public.setores WHERE slug='configuracao' LIMIT 1)
+  `, [req.params.ordemId]);
+
+  // 2) status geral -> 'configurado'
+  await pool.query(`
+    UPDATE public.ordem_producao_uniformes_dados_ordem
+       SET status = 'configurado'
+     WHERE id = $1
+  `, [req.params.ordemId]);
+
+  res.json({ ok: true, novo_status: 'configurado' });
+});
+
+router.post('/setores/configuracao/ordens/:ordemId/itens/:itemId/finalizar', requireAuth, async (req, res) => {
+  // Se futuramente quiser gravar progresso por item, faça aqui.
+  res.json({ ok: true });
+});
+
+
 
 
 export default router;
