@@ -195,10 +195,13 @@ router.post('/ordens-uniformes/:id/enviar', requireAuth, async (req, res) => {
     // Atualiza status da ordem
     await client.query(
       `UPDATE ordem_producao_uniformes_dados_ordem
-         SET status = 'enviada'
+         SET status = 'enviada',
+             motivo_devolucao = NULL,
+             devolvida_em = NULL
        WHERE id = $1`,
       [id]
     );
+    
 
     // Garante vínculo com setor "configuracao"
     const { rows } = await client.query(

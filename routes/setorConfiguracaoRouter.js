@@ -188,12 +188,14 @@ await pool.query(`
     );
 
     // 2) status geral para o representante
-    await client.query(
-      `UPDATE public.ordem_producao_uniformes_dados_ordem
-          SET status = 'devolvida'
-        WHERE id = $1`,
-      [os.ordem_id]
-    );
+    await pool.query(`
+    UPDATE public.ordem_producao_uniformes_dados_ordem
+       SET status = 'devolvida',
+           motivo_devolucao = $2,
+           devolvida_em = NOW()
+     WHERE id = $1
+  `, [req.params.ordemId, motivo]);
+  
 
     // 3) remove todos os vínculos com setores (some das filas)
     await client.query(`DELETE FROM public.ordem_setores WHERE ordem_id = $1`, [os.ordem_id]);
