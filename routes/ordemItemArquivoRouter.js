@@ -296,6 +296,34 @@ router.get('/:ordemId/itens/:itemId/layout/stage/:stageId/status', requireAuth, 
   }
 });
 
+// 2.1) URL temporária (assinada) do preview no STAGING
+router.get('/:ordemId/itens/:itemId/layout/stage/:stageId/preview-url', requireAuth, async (req, res) => {
+  try {
+    const { itemId, stageId } = req.params;
+
+    // confere se o estágio ainda é o atual do item
+    const r = await db.query(
+      `SELECT layout_stage_id FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`,
+      [itemId]
+    );
+    if (!r.rows[0] || r.rows[0].layout_stage_id !== stageId) {
+      return res.status(410).json({ erro: 'Estágio inválido para este item.' });
+    }
+
+    const keyPrev = buildStagePreviewKey(itemId, stageId);
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyPrev }),
+      { expiresIn: 60 * 5 }
+    );
+    return res.json({ url, expiresInSec: 300 });
+  } catch (e) {
+    console.error('layout/stage preview-url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao gerar URL do preview temporário.' });
+  }
+});
+
+
 // ===== DEV-ONLY: simula o worker gerando preview.png no staging =====
 // NÃO suba isso pra produção.
 if (process.env.NODE_ENV !== 'production') {
