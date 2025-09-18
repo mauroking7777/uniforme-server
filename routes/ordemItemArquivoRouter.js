@@ -16,6 +16,8 @@ import {
   HeadObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import fetch from 'node-fetch'; // se seu Node for >=18, pode remover e usar fetch global
+
 
 const router = express.Router();
 
@@ -140,6 +142,84 @@ async function presignGet(objectKey, seconds = 900, contentType) {
   );
 }
 
+// ===== Config do worker de preview =====
+const PREVIEW_WORKER_URL = process.env.PREVIEW_WORKER_URL || 'http://localhost:4001';
+
+// chama o worker e devolve um Buffer PNG
+async function callWorkerConvert(cdrSignedUrl, width = 3000) {
+  const resp = await fetch(`${PREVIEW_WORKER_URL}/convert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cdrUrl: cdrSignedUrl, width }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(t || `Worker respondeu ${resp.status}`);
+  }
+  // resposta: { pngBase64: '...' }
+  const data = await resp.json();
+  if (!data?.pngBase64) throw new Error('Worker não retornou pngBase64');
+  return Buffer.from(data.pngBase64, 'base64');
+}
+
+// agenda conversão p/ STAGING por ITEM (assíncrona, sem travar a rota)
+async function dispatchPreviewJobForItem(itemId, stageId, keyStageCdr) {
+  try {
+    const cdrUrl = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr }),
+      { expiresIn: 60 * 10 }
+    );
+    const pngBuf = await callWorkerConvert(cdrUrl, 3000);
+    const keyPrev = buildStagePreviewKey(itemId, stageId);
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: keyPrev,
+      Body: pngBuf,
+      ContentType: 'image/png',
+      CacheControl: 'no-cache',
+    }));
+    // Status "ok" é inferido pela existência do arquivo (headExists em /status)
+  } catch (e) {
+    console.error('dispatchPreviewJobForItem erro:', e);
+    // marca erro no item (para status mostrar "error")
+    try {
+      await db.query(
+        `UPDATE ordem_producao_uniformes_dados_modelo
+            SET preview_status = 'error',
+                preview_error  = $2
+          WHERE id = $1 AND layout_stage_id = $3`,
+        [itemId, String(e.message || e).slice(0, 240), stageId]
+      );
+    } catch {}
+  }
+}
+
+// agenda conversão p/ STAGING por ORDEM
+async function dispatchPreviewJobForOrder(ordemId, stageId, keyStageCdr) {
+  try {
+    const cdrUrl = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr }),
+      { expiresIn: 60 * 10 }
+    );
+    const pngBuf = await callWorkerConvert(cdrUrl, 3000);
+    const keyPrev = buildOrderStagePreviewKey(ordemId, stageId);
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: keyPrev,
+      Body: pngBuf,
+      ContentType: 'image/png',
+      CacheControl: 'no-cache',
+    }));
+    // Por ORDEM não gravamos status no banco; /status vê a existência do arquivo
+  } catch (e) {
+    console.error('dispatchPreviewJobForOrder erro:', e);
+    // opcional: gravar um marcador de erro no staging/ordens/... (não necessário agora)
+  }
+}
+
+
 /* =========================================================
  * PREVIEW (PNG/JPG) — upload direto pelo front (presign)
  * ========================================================= */
@@ -257,8 +337,9 @@ router.post('/:ordemId/itens/:itemId/layout/stage', requireAuth, upload.single('
       [itemId, stageId]
     );
 
-    // aqui você publicará o JOB para o worker (baixar keyStageCdr e gerar preview.png em staging)
-    // job: { itemId, stageId, cdr_key: keyStageCdr }
+// dispara o worker de forma assíncrona (não trava a resposta)
+queueMicrotask(() => dispatchPreviewJobForItem(itemId, stageId, keyStageCdr));
+
 
     return res.json({
       stageId,
@@ -335,8 +416,8 @@ router.post('/:ordemId/layout/stage', requireAuth, upload.single('file'), async 
       ContentLength: cdr.size,
     }));
 
-    // (aqui você publica o JOB para o worker gerar preview.png em staging/ordens/{ordemId}/{stageId})
-    // job: { ordemId, stageId, cdr_key: keyStageCdr }
+    queueMicrotask(() => dispatchPreviewJobForOrder(ordemId, stageId, keyStageCdr));
+
 
     return res.json({
       stageId,
