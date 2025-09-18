@@ -28,6 +28,12 @@ const {
   CDR_MAX_MB = '256',
 } = process.env;
 
+const {
+  PREVIEW_WORKER_URL,
+  CONVERT_TIMEOUT_SEC = '60',
+} = process.env;
+
+
 const CDR_MAX_BYTES = parseInt(CDR_MAX_MB, 10) * 1024 * 1024;
 
 if (!R2_BUCKET) {
@@ -140,6 +146,7 @@ async function presignGet(objectKey, seconds = 900, contentType) {
     { expiresIn: seconds }
   );
 }
+
 
 // ===== Config do worker de preview =====
 const PREVIEW_WORKER_URL = process.env.PREVIEW_WORKER_URL || 'http://localhost:4001';
@@ -1040,6 +1047,150 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
     res.status(500).json({ erro: 'Falha ao registrar arquivo' });
   }
 });
+
+// Dispara a conversão do preview (PNG) a partir do CDR mais recente do item
+router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req, res) => {
+  try {
+    if (!PREVIEW_WORKER_URL) {
+      return res.status(500).json({ erro: 'PREVIEW_WORKER_URL não configurado.' });
+    }
+    const { ordemId, itemId } = req.params;
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+
+    // pega o CDR mais recente do item (o mesmo filtro usado na rota de download-url)
+    const q = await db.query(`
+      SELECT key
+        FROM ordem_item_arquivo
+       WHERE ordem_id = $1
+         AND item_id  = $2
+         AND deleted_at IS NULL
+         AND status = 'uploaded'
+         AND key LIKE '%/corel/%'
+       ORDER BY created_at DESC
+       LIMIT 1
+    `, [ordemId, itemId]);
+
+    if (q.rowCount === 0) {
+      return res.status(404).json({ erro: 'Nenhum CDR ativo para este item.' });
+    }
+
+    const cdrKey = q.rows[0].key;
+    const cdrGetUrl = await presignGet(cdrKey, 15 * 60, 'application/octet-stream');
+
+    // criamos a key do preview e um PUT assinado para o worker subir o PNG
+    const previewKey = buildPreviewKey(ordemId, itemId, 'auto.png');
+    const putUrl = await getSignedUrl(
+      r2,
+      new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: previewKey,
+        ContentType: 'image/png',
+        CacheControl: 'public, max-age=31536000, immutable',
+      }),
+      { expiresIn: 15 * 60 }
+    );
+
+    // marcamos “converting” no item e já penduramos a key alvo
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+          SET preview_status = 'converting',
+              preview_object_key = $2,
+              preview_error = NULL,
+              preview_updated_at = NOW()
+        WHERE id = $1`,
+      [itemId, previewKey]
+    );
+
+    // chama o worker (Node 22 tem fetch global)
+    const r = await fetch(`${PREVIEW_WORKER_URL}/convert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        cdr_url: cdrGetUrl,
+        png_put_url: putUrl,
+        timeout_sec: parseInt(CONVERT_TIMEOUT_SEC, 10) || 60,
+      }),
+    });
+
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      // se der erro no disparo, deixamos status como 'error'
+      await db.query(
+        `UPDATE ordem_producao_uniformes_dados_modelo
+            SET preview_status = 'error',
+                preview_error = $2,
+                preview_updated_at = NOW()
+          WHERE id = $1`,
+        [itemId, `worker http ${r.status} ${txt}`.slice(0, 400)]
+      );
+      return res.status(502).json({ erro: 'Falha ao chamar o worker.' });
+    }
+
+    // worker terminou com sucesso (já subiu o PNG no putUrl)
+    const payload = await r.json().catch(() => ({}));
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+          SET preview_status = 'ready',
+              preview_error = NULL,
+              preview_updated_at = NOW()
+        WHERE id = $1`,
+      [itemId]
+    );
+
+    return res.json({ ok: true, info: payload, previewKey });
+  } catch (e) {
+    console.error('preview/from-cdr erro:', e);
+    try {
+      await db.query(
+        `UPDATE ordem_producao_uniformes_dados_modelo
+            SET preview_status = 'error',
+                preview_error = $2,
+                preview_updated_at = NOW()
+          WHERE id = $1`,
+        [req.params?.itemId, (e?.message || String(e)).slice(0, 400)]
+      );
+    } catch {}
+    return res.status(500).json({ erro: 'Falha ao gerar preview.' });
+  }
+});
+
+router.get('/:ordemId/itens/:itemId/preview/status', requireAuth, async (req, res) => {
+  const { itemId, ordemId } = req.params;
+  if (!(await assertItemDaOrdem(ordemId, itemId))) {
+    return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+  }
+  const { rows } = await db.query(
+    `SELECT preview_status, preview_object_key, preview_error, preview_updated_at
+       FROM ordem_producao_uniformes_dados_modelo
+      WHERE id = $1 LIMIT 1`,
+    [itemId]
+  );
+  return res.json(rows[0] || {});
+});
+
+router.get('/:ordemId/itens/:itemId/preview/url', requireAuth, async (req, res) => {
+  const { itemId, ordemId } = req.params;
+  if (!(await assertItemDaOrdem(ordemId, itemId))) {
+    return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+  }
+  const { rows } = await db.query(
+    `SELECT preview_object_key, preview_status
+       FROM ordem_producao_uniformes_dados_modelo
+      WHERE id = $1 LIMIT 1`,
+    [itemId]
+  );
+  const row = rows[0];
+  if (!row || row.preview_status !== 'ready' || !row.preview_object_key) {
+    return res.status(404).json({ erro: 'Preview ainda não disponível.' });
+    }
+  const url = await presignGet(row.preview_object_key, 10 * 60, 'image/png');
+  return res.json({ url, expiresInSec: 600 });
+});
+
+
 
 /* =========================================================
  * LISTAGEM / DOWNLOAD / DELETE (inalteradas)
