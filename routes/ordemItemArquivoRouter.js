@@ -99,6 +99,16 @@ function buildStagePreviewKey(itemId, stageId) {
   return `staging/itens/${itemId}/${stageId}/preview.png`;
 }
 
+// ===== STAGING POR ORDEM (quando ainda não existe item) =====
+function buildOrderStageCdrKey(ordemId, stageId, originalName) {
+  const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
+  return `staging/ordens/${ordemId}/${stageId}/layout_${base}.cdr`;
+}
+function buildOrderStagePreviewKey(ordemId, stageId) {
+  return `staging/ordens/${ordemId}/${stageId}/preview.png`;
+}
+
+
 async function headExists(objectKey) {
   try {
     await r2.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: objectKey }));
@@ -295,6 +305,221 @@ router.get('/:ordemId/itens/:itemId/layout/stage/:stageId/status', requireAuth, 
     return res.status(500).json({ erro: 'Falha ao consultar status do estágio.' });
   }
 });
+
+/* =========================================================
+ * LAYOUT STAGING POR ORDEM (quando ainda não há item)
+ * ========================================================= */
+
+// Inicia estágio por ORDEM
+router.post('/:ordemId/layout/stage', requireAuth, upload.single('file'), async (req, res) => {
+  try {
+    const { ordemId } = req.params;
+
+    const cdr = req.file;
+    if (!cdr) return res.status(400).json({ erro: 'Arquivo .cdr é obrigatório (campo "file").' });
+    if (!onlyCDR(cdr.originalname, cdr.mimetype)) {
+      return res.status(415).json({ erro: 'Apenas arquivos .cdr são aceitos.' });
+    }
+    if (cdr.size > CDR_MAX_BYTES) {
+      return res.status(413).json({ erro: `Arquivo maior que ${CDR_MAX_MB}MB.` });
+    }
+
+    const stageId = crypto.randomUUID();
+    const keyStageCdr = buildOrderStageCdrKey(ordemId, stageId, cdr.originalname);
+
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: keyStageCdr,
+      Body: cdr.buffer,
+      ContentType: cdr.mimetype || 'application/octet-stream',
+      ContentLength: cdr.size,
+    }));
+
+    // (aqui você publica o JOB para o worker gerar preview.png em staging/ordens/{ordemId}/{stageId})
+    // job: { ordemId, stageId, cdr_key: keyStageCdr }
+
+    return res.json({
+      stageId,
+      status: 'pending',
+      cdrTempKey: keyStageCdr,
+      fileOriginalName: cdr.originalname || 'layout.cdr'
+    });
+  } catch (e) {
+    console.error('ordem layout/stage erro:', e);
+    return res.status(500).json({ erro: 'Falha ao iniciar estágio do layout.' });
+  }
+});
+
+// Status do estágio (ORDEM)
+router.get('/:ordemId/layout/stage/:stageId/status', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, stageId } = req.params;
+    const keyPrev = buildOrderStagePreviewKey(ordemId, stageId);
+
+    if (await headExists(keyPrev)) {
+      return res.json({ status: 'ok', previewTempKey: keyPrev });
+    }
+    // se quiser suportar "erro", o worker pode gravar um error.json aqui; por ora tratamos como pending
+    return res.json({ status: 'pending' });
+  } catch (e) {
+    console.error('ordem layout/stage status erro:', e);
+    return res.status(500).json({ erro: 'Falha ao consultar status do estágio.' });
+  }
+});
+
+// URL assinada do preview (ORDEM)
+router.get('/:ordemId/layout/stage/:stageId/preview-url', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, stageId } = req.params;
+    const keyPrev = buildOrderStagePreviewKey(ordemId, stageId);
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyPrev }),
+      { expiresIn: 60 * 5 }
+    );
+    return res.json({ url, expiresInSec: 300 });
+  } catch (e) {
+    console.error('ordem layout/stage preview-url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao gerar URL do preview temporário.' });
+  }
+});
+
+// Commit do estágio (ORDEM) -> requer itemId já existente
+router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, res) => {
+  const client = await db.connect();
+  try {
+    const { ordemId, stageId } = req.params;
+    const { itemId, fileOriginalName } = req.body || {};
+    if (!itemId) return res.status(400).json({ erro: 'itemId é obrigatório no commit por ordem.' });
+
+    // confere se item pertence à ordem
+    const own = await client.query(
+      'SELECT 1 FROM ordem_producao_uniformes_dados_modelo WHERE id = $1 AND ordem_id = $2',
+      [itemId, ordemId]
+    );
+    if (own.rowCount === 0) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem.' });
+    }
+
+    const keyStageCdr  = buildOrderStageCdrKey(ordemId, stageId, fileOriginalName || 'layout.cdr');
+    const keyStagePrev = buildOrderStagePreviewKey(ordemId, stageId);
+
+    if (!(await headExists(keyStagePrev))) {
+      return res.status(400).json({ erro: 'Preview temporário não localizado.' });
+    }
+
+    const keyFinalCdr  = buildKey(ordemId, itemId, fileOriginalName || 'layout.cdr');
+    const keyFinalPrev = buildPreviewKey(ordemId, itemId, 'preview.png');
+
+    await client.query('BEGIN');
+
+    // copia CDR
+    await r2.send(new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `/${R2_BUCKET}/${keyStageCdr}`,
+      Key: keyFinalCdr,
+      ContentType: 'application/octet-stream'
+    }));
+
+    // soft-delete CDRs anteriores
+    await client.query(
+      `UPDATE ordem_item_arquivo
+          SET deleted_at = NOW()
+        WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
+      [itemId]
+    );
+
+    // registra novo CDR
+    await client.query(
+      `INSERT INTO ordem_item_arquivo
+         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)`,
+      [
+        ordemId,
+        itemId,
+        keyFinalCdr,
+        fileOriginalName || 'layout.cdr',
+        'application/octet-stream',
+        null,
+        req.user?.id || null,
+      ]
+    );
+
+    // copia PREVIEW final
+    await r2.send(new CopyObjectCommand({
+      Bucket: R2_BUCKET,
+      CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
+      Key: keyFinalPrev,
+      ContentType: 'image/png',
+      CacheControl: 'public, max-age=31536000, immutable'
+    }));
+
+    // atualiza campos do item (preview)
+    await client.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+          SET preview_status = 'ok',
+              preview_object_key = $2,
+              preview_error = NULL,
+              preview_updated_at = NOW()
+        WHERE id = $1`,
+      [itemId, keyFinalPrev]
+    );
+
+    // apaga staging
+    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStagePrev })); } catch {}
+    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr  })); } catch {}
+
+    await client.query('COMMIT');
+    return res.json({ ok: true, cdrKey: keyFinalCdr, previewKey: keyFinalPrev });
+  } catch (e) {
+    try { await db.query('ROLLBACK'); } catch {}
+    console.error('ordem layout/stage commit erro:', e);
+    return res.status(500).json({ erro: 'Falha ao confirmar layout.' });
+  } finally {
+    client.release();
+  }
+});
+
+// Cancel do estágio (ORDEM)
+router.post('/:ordemId/layout/stage/:stageId/cancel', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, stageId } = req.params;
+    const keyStagePrev = buildOrderStagePreviewKey(ordemId, stageId);
+    const keyStageCdr  = buildOrderStageCdrKey(ordemId, stageId, 'layout.cdr');
+
+    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStagePrev })); } catch {}
+    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr  })); } catch {}
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('ordem layout/stage cancel erro:', e);
+    return res.status(500).json({ erro: 'Falha ao cancelar estágio.' });
+  }
+});
+
+// ===== DEV-ONLY: simula o worker (ORDEM)
+if (process.env.NODE_ENV !== 'production') {
+  router.post('/:ordemId/layout/stage/:stageId/mock-ok', requireAuth, async (req, res) => {
+    try {
+      const { ordemId, stageId } = req.params;
+      const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=';
+      const buf = Buffer.from(b64, 'base64');
+      const keyPrev = buildOrderStagePreviewKey(ordemId, stageId);
+      await r2.send(new PutObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: keyPrev,
+        Body: buf,
+        ContentType: 'image/png',
+        CacheControl: 'no-cache'
+      }));
+      return res.json({ ok: true, previewTempKey: keyPrev });
+    } catch (e) {
+      console.error('mock-ok ordem erro:', e);
+      return res.status(500).json({ erro: 'Falha ao simular preview.' });
+    }
+  });
+}
+
 
 // 2.1) URL temporária (assinada) do preview no STAGING
 router.get('/:ordemId/itens/:itemId/layout/stage/:stageId/preview-url', requireAuth, async (req, res) => {
