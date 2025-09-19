@@ -10,20 +10,29 @@ app.use(express.json({ limit: '50mb' }));
 
 const MAX_SEC = Number(process.env.CONVERT_TIMEOUT_SEC || 60);
 const TMP_DIR = process.env.TMP_DIR || '/tmp';
-const CC_API = process.env.CLOUDCONVERT_API_KEY || ''; // opcional (fallback)
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-// util: baixa um URL para arquivo temporário
-async function downloadTo(tmpPath, url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Falha ao baixar (${r.status})`);
-  const abuf = await r.arrayBuffer();
-  await fs.writeFile(tmpPath, Buffer.from(abuf));
+// ---------- helpers ----------
+function runCmd(cmd, args, timeoutSec = MAX_SEC) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} ; reject(new Error(`Timeout: ${cmd}`)); }, timeoutSec * 1000);
+    child.stderr.on('data', d => (stderr += d.toString()));
+    child.on('error', reject);
+    child.on('exit', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`${cmd} exit ${code}. ${stderr.slice(0,600)}`)); });
+  });
 }
 
-// util: roda inkscape com modo 'drawing' ou 'page'
-async function runInkscape(inPath, outPath, mode, width, timeoutSec) {
+async function downloadFile(url, toPath) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Falha ao baixar (${r.status})`);
+  const buf = Buffer.from(await r.arrayBuffer());
+  await fs.writeFile(toPath, buf);
+}
+
+async function inkscapeExport(inPath, outPath, mode, width) {
   const args = [
     inPath,
     '--export-type=png',
@@ -31,130 +40,97 @@ async function runInkscape(inPath, outPath, mode, width, timeoutSec) {
     mode === 'page' ? '--export-area-page' : '--export-area-drawing',
     `--export-width=${width}`,
     '--export-background=white',
-    '--export-background-opacity=1',
+    '--export-background-opacity=1'
   ];
-  let stderr = '';
-  await new Promise((resolve, reject) => {
-    const child = spawn('inkscape', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch {}
-      reject(new Error('Timeout na conversão'));
-    }, (timeoutSec || MAX_SEC) * 1000);
-
-    child.stderr.on('data', d => (stderr += d.toString()));
-    child.on('error', reject);
-    child.on('exit', code => {
-      clearTimeout(timer);
-      code === 0 ? resolve() : reject(new Error(`Inkscape(${mode}) code=${code} ${stderr.slice(0,500)}`));
-    });
-  });
+  await runCmd('inkscape', args);
 }
 
-// heurística simples pra detectar “png branco/suspeito” sem libs pesadas
-function seemsBlank(pngBuffer) {
-  // PNG todo branco e grande costuma ficar MUITO pequeno por compressão.
-  // Ajuste se necessário; 16k a 25k costuma ser um bom corte pra width~1600.
-  return pngBuffer.length < 16000;
+function seemsBlank(pngBuf) {
+  // heurística simples: PNG *muito* pequeno costuma ser branco (ajuste se quiser)
+  return pngBuf.length < 16000;
 }
 
-// fallback CloudConvert — usa só quando inkscape falha ou fica branco
-async function convertViaCloudConvert(cdrUrl, width = 1600) {
-  if (!CC_API) throw new Error('CLOUDCONVERT_API_KEY não configurada');
-  // cria job (import -> convert -> export)
-  const makeJob = await fetch('https://api.cloudconvert.com/v2/jobs', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${CC_API}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      tasks: {
-        'import':  { operation: 'import/url', url: cdrUrl, filename: 'layout.cdr' },
-        'convert': { operation: 'convert', input: 'import', input_format: 'cdr', output_format: 'png',
-                     // parâmetros de saída:
-                     // para vetores, "width" funciona como destino aprox.
-                     // (o engine decide como encaixar; manter simples)
-                     width },
-        'export':  { operation: 'export/url', input: 'convert' }
-      }
-    })
-  });
-  if (!makeJob.ok) throw new Error(`CC job http ${makeJob.status}`);
-  const job = await makeJob.json();
-  const jobId = job?.data?.id;
-  if (!jobId) throw new Error('CC: job id ausente');
-
-  // poll até finalizar
-  const start = Date.now();
-  while (Date.now() - start < (MAX_SEC * 1000)) {
-    await new Promise(r => setTimeout(r, 1500));
-    const jr = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}`, {
-      headers: { 'Authorization': `Bearer ${CC_API}` }
-    });
-    if (!jr.ok) continue;
-    const j = await jr.json();
-    if (j?.data?.status === 'finished') {
-      const exportTask = (j.data.tasks || []).find(t => t.name === 'export' && t.status === 'finished');
-      const fileUrl = exportTask?.result?.files?.[0]?.url;
-      if (!fileUrl) throw new Error('CC: URL de saída ausente');
-      const buf = Buffer.from(await (await fetch(fileUrl)).arrayBuffer());
-      return buf;
-    }
-    if (j?.data?.status === 'error') throw new Error('CC: job erro');
+async function libreOfficePdf(inPath, outPdf) {
+  // perfil isolado por execução (evita conflito em paralelismo)
+  const profile = `file://${TMP_DIR}/lo-profile-${randomUUID()}`;
+  const outDir = path.dirname(outPdf);
+  await fs.mkdir(outDir, { recursive: true });
+  // Converte CDR -> PDF (página 1 geralmente é o layout)
+  await runCmd('soffice', [
+    '--headless','--nologo','--invisible','--nodefault','--view','--nolockcheck',
+    `-env:UserInstallation=${profile}`,
+    '--convert-to','pdf',
+    '--outdir', outDir,
+    inPath
+  ]);
+  // LibreOffice usa o nome do arquivo como base; garantimos nome do PDF
+  // Se não gerou com o mesmo nome, tentamos achar um .pdf no outDir
+  try {
+    await fs.access(outPdf);
+  } catch {
+    const base = path.basename(inPath, path.extname(inPath));
+    const alt = path.join(outDir, `${base}.pdf`);
+    await fs.access(alt);
+    await fs.rename(alt, outPdf);
   }
-  throw new Error('CC: timeout');
 }
 
+async function pdfToPng(inPdf, outPng, width) {
+  // Renderiza só a 1ª página; scale-to define largura em px
+  const outPrefix = outPng.replace(/\.png$/i, '');
+  await runCmd('pdftoppm', ['-png','-singlefile','-f','1','-l','1', '-scale-to', String(width), inPdf, outPrefix]);
+}
+
+// ---------- endpoint ----------
 app.post('/convert', async (req, res) => {
   const { cdr_url, cdrUrl, png_put_url, width } = req.body || {};
   const sourceUrl = cdr_url || cdrUrl;
   if (!sourceUrl) return res.status(400).send('cdr_url é obrigatório');
 
+  const W = Number(width || 1800);
   const id = randomUUID();
-  const inPath = path.join(TMP_DIR, `${id}.cdr`);
+  const inPath  = path.join(TMP_DIR, `${id}.cdr`);
   const outPath = path.join(TMP_DIR, `${id}.png`);
+  const pdfPath = path.join(TMP_DIR, `${id}.pdf`);
+
+  let png = null;
 
   try {
-    // 1) baixa CDR
-    await downloadTo(inPath, sourceUrl);
+    await downloadFile(sourceUrl, inPath);
 
-    const W = Number(width || 1600);
+    // 1) Inkscape (drawing)
+    await inkscapeExport(inPath, outPath, 'drawing', W);
+    png = await fs.readFile(outPath);
 
-    // 2) tenta inkscape (drawing)
-    await runInkscape(inPath, outPath, 'drawing', W, MAX_SEC);
-    let png = await fs.readFile(outPath);
-
-    // 3) se “suspeito”, tenta inkscape (page)
+    // 2) Inkscape (page) se suspeito
     if (seemsBlank(png)) {
-      await runInkscape(inPath, outPath, 'page', W, MAX_SEC);
+      await inkscapeExport(inPath, outPath, 'page', W);
       png = await fs.readFile(outPath);
     }
 
-    // 4) se ainda “suspeito”, fallback CloudConvert (se configurado)
-    if (seemsBlank(png) && CC_API) {
-      png = await convertViaCloudConvert(sourceUrl, W);
+    // 3) LibreOffice -> PDF -> PNG se ainda suspeito
+    if (seemsBlank(png)) {
+      await libreOfficePdf(inPath, pdfPath);
+      await pdfToPng(pdfPath, outPath, W);
+      png = await fs.readFile(outPath);
     }
 
-    // 5) upload direto pro R2 se mandaram PUT assinado
+    // 4) upload pro R2 se mandaram URL de PUT
     if (png_put_url) {
       await fetch(png_put_url, {
         method: 'PUT',
-        headers: {
-          'Content-Type': 'image/png',
-          'Cache-Control': 'public, max-age=31536000, immutable'
-        },
+        headers: { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable' },
         body: png
       });
     }
 
-    res.json({ ok: true, width: W, size: png.length, engine: 'auto' });
+    return res.json({ ok: true, width: W, size: png.length, engine: 'inkscape|libreoffice' });
   } catch (e) {
-    res.status(422).send(String(e?.message || e));
+    return res.status(422).send(String(e?.message || e));
   } finally {
-    try { await fs.unlink(inPath); } catch {}
-    try { await fs.unlink(outPath); } catch {}
+    for (const p of [inPath, outPath, pdfPath]) { try { await fs.unlink(p); } catch {} }
   }
 });
 
-const port = process.env.PORT || 4001;
+const port = process.env.PORT || 10000;
 app.listen(port, () => console.log(`preview-worker ouvindo em ${port}`));

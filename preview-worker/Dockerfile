@@ -1,24 +1,29 @@
-# Node 22 para casar com "engines": { node: "22.x" }
 FROM node:22-bookworm-slim
 
-# Inkscape para conversão
+# Ferramentas de conversão
 RUN apt-get update \
- && apt-get install -y --no-install-recommends inkscape \
+ && apt-get install -y --no-install-recommends \
+      inkscape \
+      libreoffice \
+      poppler-utils \
+      fonts-dejavu \
+      fonts-liberation \
+      fonts-noto \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# >>> IMPORTANTE: copie package.json E package-lock.json antes do npm ci
+# Manifests primeiro (aproveitar cache) — usa seu package-lock.json
 COPY package.json package-lock.json ./
-
-# --omit=dev é o substituto moderno de --only=production
+ENV NODE_ENV=production
 RUN npm ci --omit=dev
 
-# Agora copia o código
+# Código
 COPY . .
 
-ENV NODE_ENV=production
-ENV PORT=10000
+ENV PORT=10000 \
+    CONVERT_TIMEOUT_SEC=90 \
+    TMP_DIR=/tmp
 EXPOSE 10000
 
 CMD ["node", "index.js"]
