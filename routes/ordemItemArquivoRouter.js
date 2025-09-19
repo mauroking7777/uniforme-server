@@ -148,9 +148,6 @@ async function presignGet(objectKey, seconds = 900, contentType) {
 }
 
 
-// ===== Config do worker de preview =====
-const PREVIEW_WORKER_URL = process.env.PREVIEW_WORKER_URL || 'http://localhost:4001';
-
 // chama o worker e devolve um Buffer PNG
 async function callWorkerConvert(cdrSignedUrl, width = 3000) {
   const resp = await fetch(`${PREVIEW_WORKER_URL}/convert`, {
