@@ -1,120 +1,160 @@
 import express from 'express';
+import fetch from 'node-fetch';
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
-import path from 'path';
 import { randomUUID } from 'crypto';
-
-// Em Node >=18 fetch já é global; se quiser garantir em versões antigas, instale node-fetch e descomente:
-// import fetch from 'node-fetch';
+import path from 'path';
 
 const app = express();
+app.use(express.json({ limit: '50mb' }));
 
-// Aceita JSON (para receber { cdrUrl, width, mode }) e binário bruto (CDR em octet-stream)
-app.use(express.json({ limit: '100mb' }));
-app.use(express.raw({ type: 'application/octet-stream', limit: '200mb' }));
-
-// ===== Config =====
-const MAX_SEC = Number(process.env.CONVERT_TIMEOUT_SEC || 60); // timeout por conversão
-const TMP_DIR = process.env.TMP_DIR || '/tmp';                  // diretório temporário padrão
-const DEFAULT_WIDTH = Number(process.env.DEFAULT_PREVIEW_W || 2000); // largura padrão do PNG
+const MAX_SEC = Number(process.env.CONVERT_TIMEOUT_SEC || 60);
+const TMP_DIR = process.env.TMP_DIR || '/tmp';
+const CC_API = process.env.CLOUDCONVERT_API_KEY || ''; // opcional (fallback)
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 
-/**
- * POST /convert
- * 1) Modo JSON:  Content-Type: application/json
- *    body: { cdrUrl: string, width?: number, mode?: 'drawing'|'page' }
- *
- * 2) Modo binário: Content-Type: application/octet-stream (body = arquivo CDR)
- *    querystring opcional: ?w=2000&mode=drawing
- */
-app.post('/convert', async (req, res) => {
-  // fontes de config (query > body > defaults)
-  const qsW = req.query.w && Number(req.query.w);
-  const bodyW = (req.body && typeof req.body === 'object') ? Number(req.body.width) : undefined;
-  const width = clampNumber(qsW || bodyW || DEFAULT_WIDTH, 300, 6000);
+// util: baixa um URL para arquivo temporário
+async function downloadTo(tmpPath, url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Falha ao baixar (${r.status})`);
+  const abuf = await r.arrayBuffer();
+  await fs.writeFile(tmpPath, Buffer.from(abuf));
+}
 
-  const qsMode = (typeof req.query.mode === 'string' ? req.query.mode : '').toLowerCase();
-  const bodyMode = (req.body && typeof req.body === 'object' && typeof req.body.mode === 'string')
-    ? req.body.mode.toLowerCase()
-    : undefined;
-  const mode = (qsMode === 'page' || bodyMode === 'page') ? 'page' : 'drawing'; // default = drawing
+// util: roda inkscape com modo 'drawing' ou 'page'
+async function runInkscape(inPath, outPath, mode, width, timeoutSec) {
+  const args = [
+    inPath,
+    '--export-type=png',
+    `--export-filename=${outPath}`,
+    mode === 'page' ? '--export-area-page' : '--export-area-drawing',
+    `--export-width=${width}`,
+    '--export-background=white',
+    '--export-background-opacity=1',
+  ];
+  let stderr = '';
+  await new Promise((resolve, reject) => {
+    const child = spawn('inkscape', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => {
+      try { child.kill('SIGKILL'); } catch {}
+      reject(new Error('Timeout na conversão'));
+    }, (timeoutSec || MAX_SEC) * 1000);
+
+    child.stderr.on('data', d => (stderr += d.toString()));
+    child.on('error', reject);
+    child.on('exit', code => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error(`Inkscape(${mode}) code=${code} ${stderr.slice(0,500)}`));
+    });
+  });
+}
+
+// heurística simples pra detectar “png branco/suspeito” sem libs pesadas
+function seemsBlank(pngBuffer) {
+  // PNG todo branco e grande costuma ficar MUITO pequeno por compressão.
+  // Ajuste se necessário; 16k a 25k costuma ser um bom corte pra width~1600.
+  return pngBuffer.length < 16000;
+}
+
+// fallback CloudConvert — usa só quando inkscape falha ou fica branco
+async function convertViaCloudConvert(cdrUrl, width = 1600) {
+  if (!CC_API) throw new Error('CLOUDCONVERT_API_KEY não configurada');
+  // cria job (import -> convert -> export)
+  const makeJob = await fetch('https://api.cloudconvert.com/v2/jobs', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${CC_API}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      tasks: {
+        'import':  { operation: 'import/url', url: cdrUrl, filename: 'layout.cdr' },
+        'convert': { operation: 'convert', input: 'import', input_format: 'cdr', output_format: 'png',
+                     // parâmetros de saída:
+                     // para vetores, "width" funciona como destino aprox.
+                     // (o engine decide como encaixar; manter simples)
+                     width },
+        'export':  { operation: 'export/url', input: 'convert' }
+      }
+    })
+  });
+  if (!makeJob.ok) throw new Error(`CC job http ${makeJob.status}`);
+  const job = await makeJob.json();
+  const jobId = job?.data?.id;
+  if (!jobId) throw new Error('CC: job id ausente');
+
+  // poll até finalizar
+  const start = Date.now();
+  while (Date.now() - start < (MAX_SEC * 1000)) {
+    await new Promise(r => setTimeout(r, 1500));
+    const jr = await fetch(`https://api.cloudconvert.com/v2/jobs/${jobId}`, {
+      headers: { 'Authorization': `Bearer ${CC_API}` }
+    });
+    if (!jr.ok) continue;
+    const j = await jr.json();
+    if (j?.data?.status === 'finished') {
+      const exportTask = (j.data.tasks || []).find(t => t.name === 'export' && t.status === 'finished');
+      const fileUrl = exportTask?.result?.files?.[0]?.url;
+      if (!fileUrl) throw new Error('CC: URL de saída ausente');
+      const buf = Buffer.from(await (await fetch(fileUrl)).arrayBuffer());
+      return buf;
+    }
+    if (j?.data?.status === 'error') throw new Error('CC: job erro');
+  }
+  throw new Error('CC: timeout');
+}
+
+app.post('/convert', async (req, res) => {
+  const { cdr_url, cdrUrl, png_put_url, width } = req.body || {};
+  const sourceUrl = cdr_url || cdrUrl;
+  if (!sourceUrl) return res.status(400).send('cdr_url é obrigatório');
 
   const id = randomUUID();
   const inPath = path.join(TMP_DIR, `${id}.cdr`);
   const outPath = path.join(TMP_DIR, `${id}.png`);
 
-  let needCleanupIn = false;
-  let needCleanupOut = false;
-
   try {
-    await fs.mkdir(TMP_DIR, { recursive: true });
+    // 1) baixa CDR
+    await downloadTo(inPath, sourceUrl);
 
-    // 1) Obter o CDR (binário bruto OU via URL assinada)
-    if (req.is('application/octet-stream')) {
-      if (!req.body || !Buffer.isBuffer(req.body) || req.body.length === 0) {
-        return res.status(400).send('Body vazio (octet-stream) não recebido.');
-      }
-      await fs.writeFile(inPath, req.body);
-      needCleanupIn = true;
-    } else {
-      const body = (req.body && typeof req.body === 'object') ? req.body : {};
-      const cdrUrl = body.cdrUrl;
-      if (!cdrUrl) return res.status(400).send('cdrUrl é obrigatório (JSON) ou envie o CDR como application/octet-stream.');
-      const r = await fetch(cdrUrl);
-      if (!r.ok) return res.status(400).send(`Falha ao baixar CDR: HTTP ${r.status}`);
-      const ab = await r.arrayBuffer();
-      await fs.writeFile(inPath, Buffer.from(ab));
-      needCleanupIn = true;
+    const W = Number(width || 1600);
+
+    // 2) tenta inkscape (drawing)
+    await runInkscape(inPath, outPath, 'drawing', W, MAX_SEC);
+    let png = await fs.readFile(outPath);
+
+    // 3) se “suspeito”, tenta inkscape (page)
+    if (seemsBlank(png)) {
+      await runInkscape(inPath, outPath, 'page', W, MAX_SEC);
+      png = await fs.readFile(outPath);
     }
 
-    // 2) Inkscape headless -> PNG
-    const args = [
-      inPath,
-      '--export-type=png',
-      `--export-filename=${outPath}`,
-      mode === 'page' ? '--export-area-page' : '--export-area-drawing',
-      `--export-width=${width}`,
-      '--export-background=white',
-      '--export-background-opacity=1',
-    ];
+    // 4) se ainda “suspeito”, fallback CloudConvert (se configurado)
+    if (seemsBlank(png) && CC_API) {
+      png = await convertViaCloudConvert(sourceUrl, W);
+    }
 
-    const child = spawn('inkscape', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let stderr = '';
-    child.stderr.on('data', d => (stderr += d.toString()));
-
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch {}
-        reject(new Error('Timeout na conversão'));
-      }, MAX_SEC * 1000);
-
-      child.on('error', reject);
-      child.on('exit', (code) => {
-        clearTimeout(timer);
-        if (code === 0) resolve();
-        else reject(new Error(`Inkscape saiu com código ${code}. STDERR: ${stderr.slice(0, 600)}`));
+    // 5) upload direto pro R2 se mandaram PUT assinado
+    if (png_put_url) {
+      await fetch(png_put_url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=31536000, immutable'
+        },
+        body: png
       });
-    });
+    }
 
-    // 3) Responder PNG em base64 (para exibir no modal)
-    const png = await fs.readFile(outPath);
-    needCleanupOut = true;
-    res.json({ pngBase64: png.toString('base64'), width, mode });
+    res.json({ ok: true, width: W, size: png.length, engine: 'auto' });
   } catch (e) {
     res.status(422).send(String(e?.message || e));
   } finally {
-    if (needCleanupIn) { try { await fs.unlink(inPath); } catch {} }
-    if (needCleanupOut) { try { await fs.unlink(outPath); } catch {} }
+    try { await fs.unlink(inPath); } catch {}
+    try { await fs.unlink(outPath); } catch {}
   }
 });
 
-function clampNumber(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  return Math.max(min, Math.min(max, x));
-}
-
-const port = process.env.PORT || 10000;
+const port = process.env.PORT || 4001;
 app.listen(port, () => console.log(`preview-worker ouvindo em ${port}`));
