@@ -1,14 +1,15 @@
 {
   "name": "preview-worker",
   "version": "1.0.0",
-  "type": "module",
   "private": true,
+  "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": { "node": "22.x" },
   "dependencies": {
-    "express": "^4.19.2"
-    // Se quiser usar import de 'node-fetch', adicione:
-    // "node-fetch": "^3.3.2"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2"
   }
 }

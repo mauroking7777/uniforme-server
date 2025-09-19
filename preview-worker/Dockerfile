@@ -1,19 +1,21 @@
-# Usa Node + Debian para conseguir instalar o Inkscape
-FROM node:20-bullseye-slim
+# Node 22 para casar com "engines": { node: "22.x" }
+FROM node:22-bookworm-slim
 
-# Inkscape (renderizador)
+# Inkscape para conversão
 RUN apt-get update \
  && apt-get install -y --no-install-recommends inkscape \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Só copia package.json primeiro p/ cache
-COPY package.json ./
-RUN npm ci --only=production
+# >>> IMPORTANTE: copie package.json E package-lock.json antes do npm ci
+COPY package.json package-lock.json ./
 
-# Agora o código
-COPY index.js ./index.js
+# --omit=dev é o substituto moderno de --only=production
+RUN npm ci --omit=dev
+
+# Agora copia o código
+COPY . .
 
 ENV NODE_ENV=production
 ENV PORT=10000
