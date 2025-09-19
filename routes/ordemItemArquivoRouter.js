@@ -1046,6 +1046,7 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
 });
 
 // Dispara a conversão do preview (PNG) a partir do CDR mais recente do item
+// Dispara a conversão do preview (PNG) a partir do CDR mais recente do item
 router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req, res) => {
   try {
     if (!PREVIEW_WORKER_URL) {
@@ -1057,7 +1058,7 @@ router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req,
       return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
     }
 
-    // pega o CDR mais recente do item (o mesmo filtro usado na rota de download-url)
+    // Busca o CDR mais recente do item
     const q = await db.query(`
       SELECT key
         FROM ordem_item_arquivo
@@ -1077,23 +1078,25 @@ router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req,
     const cdrKey = q.rows[0].key;
     const cdrGetUrl = await presignGet(cdrKey, 15 * 60, 'application/octet-stream');
 
-    // criamos a key do preview e um PUT assinado para o worker subir o PNG
+    // chave final do preview
     const previewKey = buildPreviewKey(ordemId, itemId, 'auto.png');
-    const putUrl = await getSignedUrl(
-      r2,
-      new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: previewKey,
-        ContentType: 'image/png',
-        CacheControl: 'public, max-age=31536000, immutable',
-      }),
-      { expiresIn: 15 * 60 }
-    );
 
-    // marcamos “converting” no item e já penduramos a key alvo
+    // chama o worker para converter e nos devolver o PNG em memória
+    const pngBuf = await callWorkerConvert(cdrGetUrl, 3000); // 3000 px de largura (ajuste se quiser)
+
+    // grava o PNG final no R2
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: previewKey,
+      Body: pngBuf,
+      ContentType: 'image/png',
+      CacheControl: 'public, max-age=31536000, immutable',
+    }));
+
+    // marca como pronto no item
     await db.query(
       `UPDATE ordem_producao_uniformes_dados_modelo
-          SET preview_status = 'converting',
+          SET preview_status = 'ready',
               preview_object_key = $2,
               preview_error = NULL,
               preview_updated_at = NOW()
@@ -1101,43 +1104,7 @@ router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req,
       [itemId, previewKey]
     );
 
-    // chama o worker (Node 22 tem fetch global)
-    const r = await fetch(`${PREVIEW_WORKER_URL}/convert`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        cdr_url: cdrGetUrl,
-        png_put_url: putUrl,
-        timeout_sec: parseInt(CONVERT_TIMEOUT_SEC, 10) || 60,
-      }),
-    });
-
-    if (!r.ok) {
-      const txt = await r.text().catch(() => '');
-      // se der erro no disparo, deixamos status como 'error'
-      await db.query(
-        `UPDATE ordem_producao_uniformes_dados_modelo
-            SET preview_status = 'error',
-                preview_error = $2,
-                preview_updated_at = NOW()
-          WHERE id = $1`,
-        [itemId, `worker http ${r.status} ${txt}`.slice(0, 400)]
-      );
-      return res.status(502).json({ erro: 'Falha ao chamar o worker.' });
-    }
-
-    // worker terminou com sucesso (já subiu o PNG no putUrl)
-    const payload = await r.json().catch(() => ({}));
-    await db.query(
-      `UPDATE ordem_producao_uniformes_dados_modelo
-          SET preview_status = 'ready',
-              preview_error = NULL,
-              preview_updated_at = NOW()
-        WHERE id = $1`,
-      [itemId]
-    );
-
-    return res.json({ ok: true, info: payload, previewKey });
+    return res.json({ ok: true, previewKey });
   } catch (e) {
     console.error('preview/from-cdr erro:', e);
     try {
@@ -1153,6 +1120,7 @@ router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req,
     return res.status(500).json({ erro: 'Falha ao gerar preview.' });
   }
 });
+
 
 router.get('/:ordemId/itens/:itemId/preview/status', requireAuth, async (req, res) => {
   const { itemId, ordemId } = req.params;
