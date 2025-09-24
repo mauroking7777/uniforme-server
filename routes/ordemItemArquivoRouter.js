@@ -147,6 +147,13 @@ async function presignGet(objectKey, seconds = 900, contentType) {
   );
 }
 
+// assina PUT no R2
+async function presignPut(objectKey, contentType = 'image/png', seconds = 900) {
+  const cmd = new PutObjectCommand({ Bucket: R2_BUCKET, Key: objectKey, ContentType: contentType, CacheControl: 'no-cache' });
+  return getSignedUrl(r2, cmd, { expiresIn: seconds });
+}
+
+
 
 // chama o worker e devolve um Buffer PNG
 async function callWorkerConvert(cdrSignedUrl, width = 3000) {
@@ -165,6 +172,21 @@ async function callWorkerConvert(cdrSignedUrl, width = 3000) {
   return Buffer.from(data.pngBase64, 'base64');
 }
 
+// chama o worker para fazer o PUT direto do PNG no R2
+async function callWorkerConvertPut(cdrSignedUrl, pngPutUrl, width = 3000) {
+  const resp = await fetch(`${PREVIEW_WORKER_URL}/convert`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cdr_url: cdrSignedUrl, png_put_url: pngPutUrl, width }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(t || `Worker respondeu ${resp.status}`);
+  }
+  return true;
+}
+
+
 // agenda conversão p/ STAGING por ITEM (assíncrona, sem travar a rota)
 async function dispatchPreviewJobForItem(itemId, stageId, keyStageCdr) {
   try {
@@ -173,15 +195,10 @@ async function dispatchPreviewJobForItem(itemId, stageId, keyStageCdr) {
       new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr }),
       { expiresIn: 60 * 10 }
     );
-    const pngBuf = await callWorkerConvert(cdrUrl, 3000);
     const keyPrev = buildStagePreviewKey(itemId, stageId);
-    await r2.send(new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: keyPrev,
-      Body: pngBuf,
-      ContentType: 'image/png',
-      CacheControl: 'no-cache',
-    }));
+    const putUrl  = await presignPut(keyPrev, 'image/png', 60 * 10);
+    await callWorkerConvertPut(cdrUrl, putUrl, 3000);
+    
     // Status "ok" é inferido pela existência do arquivo (headExists em /status)
   } catch (e) {
     console.error('dispatchPreviewJobForItem erro:', e);
@@ -206,15 +223,9 @@ async function dispatchPreviewJobForOrder(ordemId, stageId, keyStageCdr) {
       new GetObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr }),
       { expiresIn: 60 * 10 }
     );
-    const pngBuf = await callWorkerConvert(cdrUrl, 3000);
     const keyPrev = buildOrderStagePreviewKey(ordemId, stageId);
-    await r2.send(new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: keyPrev,
-      Body: pngBuf,
-      ContentType: 'image/png',
-      CacheControl: 'no-cache',
-    }));
+    const putUrl  = await presignPut(keyPrev, 'image/png', 60 * 10);
+    await callWorkerConvertPut(cdrUrl, putUrl, 3000);
     // Por ORDEM não gravamos status no banco; /status vê a existência do arquivo
   } catch (e) {
     console.error('dispatchPreviewJobForOrder erro:', e);
@@ -541,7 +552,7 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
     // atualiza campos do item (preview)
     await client.query(
       `UPDATE ordem_producao_uniformes_dados_modelo
-          SET preview_status = 'ok',
+      SET preview_status = 'ready',
               preview_object_key = $2,
               preview_error = NULL,
               preview_updated_at = NOW()
@@ -745,7 +756,7 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
     // atualiza ponteiro do preview no item
     await client.query(
       `UPDATE ordem_producao_uniformes_dados_modelo
-        SET preview_status = 'ok',
+      SET preview_status = 'ready',
               preview_object_key = $2,
               preview_error = NULL,
               preview_updated_at = NOW(),
@@ -800,8 +811,7 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/cancel', requireAuth,
  * ========================================================= */
 
 // 3) Upload direto do CDR (multipart) — agora aceita CDR + lista + PNG
-router.post(
-  '/:ordemId/itens/:itemId/cdr/upload',
+router.post('/:ordemId/itens/:itemId/cdr/upload',
   requireAuth,
   upload.fields([
     { name: 'file', maxCount: 1 },         // CDR (obrigatório)
@@ -959,18 +969,13 @@ router.post(
             'application/octet-stream'
           );
 
-          // chama o worker e recebe PNG em memória (Buffer)
-          const pngBuf = await callWorkerConvert(cdrGetUrl, 3000);
+          // chave do preview final
+const keyPreview = buildPreviewKey(ordemId, itemId, 'auto.png');
 
-          // grava PNG final
-          const keyPreview = buildPreviewKey(ordemId, itemId, 'auto.png');
-          await r2.send(new PutObjectCommand({
-            Bucket: R2_BUCKET,
-            Key: keyPreview,
-            Body: pngBuf,
-            ContentType: 'image/png',
-            CacheControl: 'public, max-age=31536000, immutable',
-          }));
+// gera URL de PUT e pede pro worker gravar direto no R2
+const putUrl = await presignPut(keyPreview, 'image/png', 60 * 10);
+await callWorkerConvertPut(cdrGetUrl, putUrl, 3000);
+
 
           // marca como pronto no item
           await db.query(
@@ -986,8 +991,9 @@ router.post(
           previewSaved = {
             key: keyPreview,
             content_type: 'image/png',
-            tamanho_bytes: pngBuf.length,
+            tamanho_bytes: null,
           };
+          
         } catch (err) {
           // marca erro no item sem quebrar o upload do CDR
           await db.query(
@@ -1107,7 +1113,7 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
   }
 });
 
-// Dispara a conversão do preview (PNG) a partir do CDR mais recente do item
+
 // Dispara a conversão do preview (PNG) a partir do CDR mais recente do item
 router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req, res) => {
   try {
@@ -1143,17 +1149,9 @@ router.post('/:ordemId/itens/:itemId/preview/from-cdr', requireAuth, async (req,
     // chave final do preview
     const previewKey = buildPreviewKey(ordemId, itemId, 'auto.png');
 
-    // chama o worker para converter e nos devolver o PNG em memória
-    const pngBuf = await callWorkerConvert(cdrGetUrl, 3000); // 3000 px de largura (ajuste se quiser)
-
-    // grava o PNG final no R2
-    await r2.send(new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: previewKey,
-      Body: pngBuf,
-      ContentType: 'image/png',
-      CacheControl: 'public, max-age=31536000, immutable',
-    }));
+    const putUrl = await presignPut(previewKey, 'image/png', 60 * 10);
+    await callWorkerConvertPut(cdrGetUrl, putUrl, 3000);
+    
 
     // marca como pronto no item
     await db.query(
@@ -1213,7 +1211,12 @@ router.get('/:ordemId/itens/:itemId/preview/url', requireAuth, async (req, res) 
   if (!row || row.preview_status !== 'ready' || !row.preview_object_key) {
     return res.status(404).json({ erro: 'Preview ainda não disponível.' });
     }
-  const url = await presignGet(row.preview_object_key, 10 * 60, 'image/png');
+    const key = String(row.preview_object_key || '');
+    const ct = key.toLowerCase().endsWith('.jpg') || key.toLowerCase().endsWith('.jpeg')
+      ? 'image/jpeg'
+      : 'image/png';
+    const url = await presignGet(key, 10 * 60, ct);
+    
   return res.json({ url, expiresInSec: 600 });
 });
 
