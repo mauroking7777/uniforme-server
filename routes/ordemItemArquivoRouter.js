@@ -1002,7 +1002,26 @@ router.post(
         }
       }
 
+      // --- resposta final do upload ---
+      return res.json({
+        ok: true,
+        cdr: {
+          id: insCdr.rows[0].id,
+          key: keyCdr,
+          nome_original: cdr.originalname || 'layout.cdr',
+          tamanho_bytes: cdr.size,
+          content_type: cdr.mimetype || 'application/octet-stream'
+        },
+        preview: previewSaved,
+        lista: listaSaved
+      });
+    } catch (e) {
+      console.error('cdr/upload erro:', e);
+      return res.status(500).json({ erro: 'Falha ao enviar CDR.' });
+    }
+  }
 );
+
 
 // 4) Presigned PUT para CDR (front faz o PUT) – inalterado
 router.post('/:ordemId/itens/:itemId/cdr/upload-url', requireAuth, async (req, res) => {
