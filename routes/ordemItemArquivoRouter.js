@@ -18,6 +18,8 @@ import {
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 
+
+
 const router = express.Router();
 
 /* =========================
@@ -513,8 +515,10 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
       Bucket: R2_BUCKET,
       CopySource: `/${R2_BUCKET}/${keyStageCdr}`,
       Key: keyFinalCdr,
-      ContentType: 'application/octet-stream'
+      ContentType: 'application/octet-stream',
+      MetadataDirective: 'REPLACE'
     }));
+    
 
     // soft-delete CDRs anteriores
     await client.query(
@@ -540,25 +544,29 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
       ]
     );
 
-    // copia PREVIEW final
-    await r2.send(new CopyObjectCommand({
-      Bucket: R2_BUCKET,
-      CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
-      Key: keyFinalPrev,
-      ContentType: 'image/png',
-      CacheControl: 'public, max-age=31536000, immutable'
-    }));
+// copia PREVIEW final
+await r2.send(new CopyObjectCommand({
+  Bucket: R2_BUCKET,
+  CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
+  Key: keyFinalPrev,
+  ContentType: 'image/png',
+  CacheControl: 'public, max-age=31536000, immutable',
+  MetadataDirective: 'REPLACE'
+}));
+
 
     // atualiza campos do item (preview)
     await client.query(
       `UPDATE ordem_producao_uniformes_dados_modelo
-      SET preview_status = 'ready',
-              preview_object_key = $2,
-              preview_error = NULL,
-              preview_updated_at = NOW()
-        WHERE id = $1`,
+       SET preview_status     = 'ready',
+           preview_object_key = $2,
+           preview_error      = NULL,
+           preview_updated_at = NOW(),
+           layout_stage_id    = NULL
+       WHERE id = $1`,
       [itemId, keyFinalPrev]
     );
+    
 
     // apaga staging
     try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStagePrev })); } catch {}
@@ -567,11 +575,11 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
     await client.query('COMMIT');
     return res.json({ ok: true, cdrKey: keyFinalCdr, previewKey: keyFinalPrev });
   } catch (e) {
-    try { await db.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('ordem layout/stage commit erro:', e);
     return res.status(500).json({ erro: 'Falha ao confirmar layout.' });
   } finally {
-    client.release();
+    client.release();  
   }
 });
 
@@ -717,8 +725,10 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
       Bucket: R2_BUCKET,
       CopySource: `/${R2_BUCKET}/${keyStageCdr}`,
       Key: keyFinalCdr,
-      ContentType: 'application/octet-stream'
+      ContentType: 'application/octet-stream',
+      MetadataDirective: 'REPLACE'
     }));
+    
 
     // soft-delete de CDRs anteriores
     await client.query(
@@ -750,8 +760,11 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
       CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
       Key: keyFinalPrev,
       ContentType: 'image/png',
-      CacheControl: 'public, max-age=31536000, immutable'
+      CacheControl: 'public, max-age=31536000, immutable',
+      MetadataDirective: 'REPLACE'
     }));
+    
+    
 
     // atualiza ponteiro do preview no item
     await client.query(
@@ -772,12 +785,13 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
     await client.query('COMMIT');
     return res.json({ ok: true, cdrKey: keyFinalCdr, previewKey: keyFinalPrev });
   } catch (e) {
-    try { await db.query('ROLLBACK'); } catch {}
+    try { await client.query('ROLLBACK'); } catch {}
     console.error('layout/stage commit erro:', e);
     return res.status(500).json({ erro: 'Falha ao confirmar layout.' });
   } finally {
     client.release();
   }
+  
 });
 
 // 4) Cancel: descarta staging e limpa estágio
