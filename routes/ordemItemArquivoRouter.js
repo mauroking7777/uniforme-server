@@ -905,9 +905,10 @@ router.post(
         listaSaved = { id: insLista.rows[0].id, key: keyLista };
       }
 
-      // === PREVIEW PNG/JPG (opcional)  ✅ NOVO
+      // === PREVIEW PNG/JPG (opcional) — se não vier, geramos via worker a partir do CDR
       let previewSaved = null;
       const png = (req.files?.preview_png || [])[0];
+
       if (png) {
         if (!onlyImage(png.originalname, png.mimetype)) {
           return res.status(415).json({ error: 'preview_png: somente PNG ou JPG/JPEG.' });
@@ -923,7 +924,6 @@ router.post(
           CacheControl: 'public, max-age=31536000, immutable',
         }));
 
-        // Atualiza status/ponteiro do preview no item
         await db.query(
           `UPDATE ordem_producao_uniformes_dados_modelo
               SET preview_status = 'ready',
@@ -939,26 +939,69 @@ router.post(
           content_type: png.mimetype || 'image/png',
           tamanho_bytes: png.size,
         };
+      } else if (process.env.PREVIEW_WORKER_URL) {
+        // Fallback automático: gerar preview da página 1 do CDR via worker
+        try {
+          // marca pendente
+          await db.query(
+            `UPDATE ordem_producao_uniformes_dados_modelo
+                SET preview_status = 'pending',
+                    preview_error = NULL,
+                    preview_updated_at = NOW()
+              WHERE id = $1`,
+            [itemId]
+          );
+
+          // URL assinada de GET do CDR recém-enviado
+          const cdrGetUrl = await presignGet(
+            keyCdr,
+            15 * 60,
+            'application/octet-stream'
+          );
+
+          // chama o worker e recebe PNG em memória (Buffer)
+          const pngBuf = await callWorkerConvert(cdrGetUrl, 3000);
+
+          // grava PNG final
+          const keyPreview = buildPreviewKey(ordemId, itemId, 'auto.png');
+          await r2.send(new PutObjectCommand({
+            Bucket: R2_BUCKET,
+            Key: keyPreview,
+            Body: pngBuf,
+            ContentType: 'image/png',
+            CacheControl: 'public, max-age=31536000, immutable',
+          }));
+
+          // marca como pronto no item
+          await db.query(
+            `UPDATE ordem_producao_uniformes_dados_modelo
+                SET preview_status = 'ready',
+                    preview_object_key = $2,
+                    preview_error = NULL,
+                    preview_updated_at = NOW()
+              WHERE id = $1`,
+            [itemId, keyPreview]
+          );
+
+          previewSaved = {
+            key: keyPreview,
+            content_type: 'image/png',
+            tamanho_bytes: pngBuf.length,
+          };
+        } catch (err) {
+          // marca erro no item sem quebrar o upload do CDR
+          await db.query(
+            `UPDATE ordem_producao_uniformes_dados_modelo
+                SET preview_status = 'error',
+                    preview_error = $2,
+                    preview_updated_at = NOW()
+              WHERE id = $1`,
+            [itemId, (err?.message || String(err)).slice(0, 400)]
+          );
+          // segue sem previewSaved
+        }
       }
 
-      return res.json({
-        ok: true,
-        cdr: { id: insCdr.rows[0].id, key: keyCdr },
-        lista: listaSaved,
-        preview: previewSaved, // ✅ presente quando PNG/JPG enviado
-      });
-    } catch (e) {
-      console.error('Erro no upload .cdr:', e);
-      if (e?.code === 'LIMIT_FILE_SIZE') {
-        return res.status(413).json({ error: `Arquivo maior que ${CDR_MAX_MB}MB` });
-      }
-      return res.status(500).json({
-        error: 'Falha ao concluir upload/registro do CDR.',
-        detail: e?.message || String(e),
-        pgcode: e?.code || null
-      });
-    }
-  }
 );
 
 // 4) Presigned PUT para CDR (front faz o PUT) – inalterado
