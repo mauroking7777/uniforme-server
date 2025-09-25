@@ -543,6 +543,23 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
         req.user?.id || null,
       ]
     );
+// --- Fallback: se o PREVIEW do stage não existir, gera o PREVIEW FINAL direto do CDR ---
+if (!(await headExists(keyStageCdr))) {
+  return res.status(400).json({ erro: 'CDR temporário não localizado.' });
+}
+
+if (!(await headExists(keyStagePrev))) {
+  try {
+    const cdrUrl = await presignGet(keyStageCdr, 60 * 10, 'application/octet-stream');
+    const putUrl  = await presignPut(keyFinalPrev, 'image/png', 60 * 10);
+    await callWorkerConvertPut(cdrUrl, putUrl, 3000);
+  } catch (e) {
+    console.error('fallback gerar preview final no commit (ordem) falhou:', e);
+    return res.status(400).json({ erro: 'Preview temporário não localizado.' });
+  }
+}
+// ---------------------------------------------------------------------------
+
 
 // copia PREVIEW final
 await r2.send(new CopyObjectCommand({
@@ -753,6 +770,23 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
         req.user?.id || null,
       ]
     );
+// --- Fallback: se o PREVIEW do stage não existir, gera o PREVIEW FINAL direto do CDR ---
+if (!(await headExists(keyStageCdr))) {
+  return res.status(400).json({ erro: 'CDR temporário não localizado.' });
+}
+
+if (!(await headExists(keyStagePrev))) {
+  try {
+    const cdrUrl = await presignGet(keyStageCdr, 60 * 10, 'application/octet-stream');
+    const putUrl  = await presignPut(keyFinalPrev, 'image/png', 60 * 10);
+    await callWorkerConvertPut(cdrUrl, putUrl, 3000);
+  } catch (e) {
+    console.error('fallback gerar preview final no commit (item) falhou:', e);
+    return res.status(400).json({ erro: 'Preview temporário não localizado.' });
+  }
+}
+// ---------------------------------------------------------------------------
+
 
     // copia PREVIEW
     await r2.send(new CopyObjectCommand({
