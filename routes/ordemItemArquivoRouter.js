@@ -500,11 +500,6 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
 
     const keyStageCdr  = buildOrderStageCdrKey(ordemId, stageId, fileOriginalName || 'layout.cdr');
     const keyStagePrev = buildOrderStagePreviewKey(ordemId, stageId);
-
-    if (!(await headExists(keyStagePrev))) {
-      return res.status(400).json({ erro: 'Preview temporário não localizado.' });
-    }
-
     const keyFinalCdr  = buildKey(ordemId, itemId, fileOriginalName || 'layout.cdr');
     const keyFinalPrev = buildPreviewKey(ordemId, itemId, 'preview.png');
 
@@ -543,12 +538,18 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
         req.user?.id || null,
       ]
     );
-// --- Fallback: se o PREVIEW do stage não existir, gera o PREVIEW FINAL direto do CDR ---
-if (!(await headExists(keyStageCdr))) {
-  return res.status(400).json({ erro: 'CDR temporário não localizado.' });
-}
 
-if (!(await headExists(keyStagePrev))) {
+// PREVIEW final: se existir no stage, copia; senão, gera agora a partir do CDR
+if (await headExists(keyStagePrev)) {
+  await r2.send(new CopyObjectCommand({
+    Bucket: R2_BUCKET,
+    CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
+    Key: keyFinalPrev,
+    ContentType: 'image/png',
+    CacheControl: 'public, max-age=31536000, immutable',
+    MetadataDirective: 'REPLACE'
+  }));
+} else {
   try {
     const cdrUrl = await presignGet(keyStageCdr, 60 * 10, 'application/octet-stream');
     const putUrl  = await presignPut(keyFinalPrev, 'image/png', 60 * 10);
@@ -558,18 +559,7 @@ if (!(await headExists(keyStagePrev))) {
     return res.status(400).json({ erro: 'Preview temporário não localizado.' });
   }
 }
-// ---------------------------------------------------------------------------
 
-
-// copia PREVIEW final
-await r2.send(new CopyObjectCommand({
-  Bucket: R2_BUCKET,
-  CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
-  Key: keyFinalPrev,
-  ContentType: 'image/png',
-  CacheControl: 'public, max-age=31536000, immutable',
-  MetadataDirective: 'REPLACE'
-}));
 
 
     // atualiza campos do item (preview)
@@ -719,17 +709,9 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
       `SELECT layout_stage_id FROM ordem_producao_uniformes_dados_modelo WHERE id = $1`,
       [itemId]
     );
-    if (!r.rows[0] || r.rows[0].layout_stage_id !== stageId) {
-      return res.status(410).json({ erro: 'Estágio inválido para este item.' });
-    }
 
     const keyStageCdr = buildStageCdrKey(itemId, stageId, fileOriginalName || 'layout.cdr');
     const keyStagePrev = buildStagePreviewKey(itemId, stageId);
-
-    // precisa existir preview no staging
-    if (!(await headExists(keyStagePrev))) {
-      return res.status(400).json({ erro: 'Preview temporário não localizado.' });
-    }
 
     // chaves finais
     const keyFinalCdr = buildKey(ordemId, itemId, fileOriginalName || 'layout.cdr');
@@ -770,12 +752,19 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
         req.user?.id || null,
       ]
     );
-// --- Fallback: se o PREVIEW do stage não existir, gera o PREVIEW FINAL direto do CDR ---
-if (!(await headExists(keyStageCdr))) {
-  return res.status(400).json({ erro: 'CDR temporário não localizado.' });
-}
 
-if (!(await headExists(keyStagePrev))) {
+
+// PREVIEW final: se existir no stage, copia; senão, gera agora a partir do CDR
+if (await headExists(keyStagePrev)) {
+  await r2.send(new CopyObjectCommand({
+    Bucket: R2_BUCKET,
+    CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
+    Key: keyFinalPrev,
+    ContentType: 'image/png',
+    CacheControl: 'public, max-age=31536000, immutable',
+    MetadataDirective: 'REPLACE'
+  }));
+} else {
   try {
     const cdrUrl = await presignGet(keyStageCdr, 60 * 10, 'application/octet-stream');
     const putUrl  = await presignPut(keyFinalPrev, 'image/png', 60 * 10);
@@ -785,20 +774,6 @@ if (!(await headExists(keyStagePrev))) {
     return res.status(400).json({ erro: 'Preview temporário não localizado.' });
   }
 }
-// ---------------------------------------------------------------------------
-
-
-    // copia PREVIEW
-    await r2.send(new CopyObjectCommand({
-      Bucket: R2_BUCKET,
-      CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
-      Key: keyFinalPrev,
-      ContentType: 'image/png',
-      CacheControl: 'public, max-age=31536000, immutable',
-      MetadataDirective: 'REPLACE'
-    }));
-    
-    
 
     // atualiza ponteiro do preview no item
     await client.query(
