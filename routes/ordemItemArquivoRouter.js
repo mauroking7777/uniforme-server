@@ -486,7 +486,7 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
   const client = await db.connect();
   try {
     const { ordemId, stageId } = req.params;
-    const { itemId, fileOriginalName } = req.body || {};
+    const { itemId, fileOriginalName, stageCdrKey } = req.body || {};
     if (!itemId) return res.status(400).json({ erro: 'itemId é obrigatório no commit por ordem.' });
 
     // confere se item pertence à ordem
@@ -498,14 +498,22 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
       return res.status(400).json({ erro: 'Item não pertence à ordem.' });
     }
 
-    const keyStageCdr  = buildOrderStageCdrKey(ordemId, stageId, fileOriginalName || 'layout.cdr');
+    // chaves do staging/finais
+    let keyStageCdr  = stageCdrKey || buildOrderStageCdrKey(ordemId, stageId, fileOriginalName || 'layout.cdr');
     const keyStagePrev = buildOrderStagePreviewKey(ordemId, stageId);
     const keyFinalCdr  = buildKey(ordemId, itemId, fileOriginalName || 'layout.cdr');
     const keyFinalPrev = buildPreviewKey(ordemId, itemId, 'preview.png');
 
+    // garante que o CDR temporário existe; tenta fallback "layout.cdr"
+    if (!(await headExists(keyStageCdr))) {
+      const alt = buildOrderStageCdrKey(ordemId, stageId, 'layout.cdr');
+      if (await headExists(alt)) keyStageCdr = alt;
+      else return res.status(400).json({ erro: 'CDR temporário não localizado.' });
+    }
+
     await client.query('BEGIN');
 
-    // copia CDR
+    // copia CDR definitivo
     await r2.send(new CopyObjectCommand({
       Bucket: R2_BUCKET,
       CopySource: `/${R2_BUCKET}/${keyStageCdr}`,
@@ -513,8 +521,9 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
       ContentType: 'application/octet-stream',
       MetadataDirective: 'REPLACE'
     }));
-    
 
+    // soft-delete dos CDRs antigos + registro do novo (mantém como está no seu arquivo) …
+    // (deixe o restante do bloco exatamente como já está, inclusive o trecho do PREVIEW abaixo)
     // soft-delete CDRs anteriores
     await client.query(
       `UPDATE ordem_item_arquivo
@@ -810,6 +819,17 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/cancel', requireAuth,
 
     const keyStagePrev = buildStagePreviewKey(itemId, stageId);
     const keyStageCdr  = buildStageCdrKey(itemId, stageId, 'layout.cdr');
+
+    // se por alguma razão o nome divergir, tenta a variante fixa
+if (!(await headExists(keyStageCdr))) {
+  const alt = buildStageCdrKey(itemId, stageId, 'layout.cdr');
+  if (await headExists(alt)) {
+    keyStageCdr = alt;
+  } else {
+    return res.status(400).json({ erro: 'CDR temporário não localizado.' });
+  }
+}
+
 
     try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStagePrev })); } catch {}
     try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr  })); } catch {}
