@@ -389,6 +389,72 @@ router.post('/:ordemId/itens/:itemId/cdr/confirm', requireAuth, async (req, res)
   }
 });
 
+// 5.1) Salvar LISTA DE NOMES (JSON) via POST (criação/edição)
+router.post('/:ordemId/itens/:itemId/lista-nomes', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { lista, modelo_codigo } = req.body || {};
+
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!Array.isArray(lista) || lista.length === 0) {
+      return res.status(400).json({ erro: 'Parâmetro "lista" inválido (array vazio).' });
+    }
+
+    // monta payload JSON (você pode adicionar mais metadados se quiser)
+    const payloadObj = { lista, modelo_codigo: modelo_codigo || null };
+    const payload = JSON.stringify(payloadObj);
+    const buf = Buffer.from(payload, 'utf8');
+
+    // chave no R2
+    const keyLista = buildListKey(ordemId, itemId);
+
+    // sobe para o R2
+    await r2.send(new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: keyLista,
+      Body: buf,
+      ContentType: 'application/json; charset=utf-8',
+      ContentLength: buf.byteLength,
+      CacheControl: 'private, max-age=0, no-cache',
+    }));
+
+    // soft-delete das listas anteriores deste item
+    await db.query(
+      `UPDATE ordem_item_arquivo
+         SET deleted_at = NOW()
+       WHERE item_id = $1
+         AND deleted_at IS NULL
+         AND key LIKE '%/listas/%'`,
+      [itemId]
+    );
+
+    // registra no banco
+    const { rows } = await db.query(
+      `INSERT INTO ordem_item_arquivo
+         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)
+       RETURNING id, key, created_at`,
+      [
+        ordemId,
+        itemId,
+        keyLista,
+        'lista-nomes.json',
+        'application/json',
+        buf.byteLength,
+        req.user?.id || null,
+      ]
+    );
+
+    return res.status(201).json({ ok: true, arquivo: rows[0] });
+  } catch (e) {
+    console.error('lista-nomes POST erro:', e);
+    return res.status(500).json({ erro: 'Falha ao salvar a lista de nomes.' });
+  }
+});
+
+
 /* =========================================================
  * LISTAGEM / DOWNLOAD / DELETE
  * ========================================================= */
