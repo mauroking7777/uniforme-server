@@ -561,9 +561,7 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
     }
 
 // 3) Inserir/registrar no banco — aderente ao schema real de `ordem_item_arquivo`
-// Usa fallback seguro para created_by (evita NOT NULL)
-const createdBySafe = String(req.user?.id ?? 'system');
-
+// (created_by fica NULL para não violar FK com usuarios)
 const insertSql = `
   INSERT INTO ordem_item_arquivo
     (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
@@ -573,13 +571,13 @@ const insertSql = `
 `;
 
 const insertVals = [
-  Number(ordemId),                          // $1 -> ordem_id
-  Number(itemId),                           // $2 -> item_id
-  finalCdrKey,                              // $3 -> key (R2 do CDR definitivo)
-  fileOriginalName || 'layout.cdr',         // $4 -> nome_original
-  'application/cdr',                        // $5 -> content_type
-  0,                                        // $6 -> tamanho_bytes (0 por enquanto)
-  createdBySafe                             // $7 -> created_by (nunca null)
+  Number(ordemId),                   // $1 -> ordem_id
+  Number(itemId),                    // $2 -> item_id
+  finalCdrKey,                       // $3 -> key (R2 do CDR definitivo)
+  fileOriginalName || 'layout.cdr',  // $4 -> nome_original
+  'application/cdr',                 // $5 -> content_type
+  0,                                 // $6 -> tamanho_bytes
+  null                               // $7 -> created_by  (FORÇA NULL)
 ];
 
 let registro;
@@ -587,7 +585,6 @@ try {
   const r = await db.query(insertSql, insertVals);
   registro = r.rows?.[0];
 } catch (dbErr) {
-  // DEBUG TEMPORÁRIO — expõe a mensagem do Postgres pra acharmos a causa
   const msg = dbErr?.detail || dbErr?.message || String(dbErr);
   console.error('Commit layout: erro ao inserir no banco ->', msg);
   return res.status(500).json({
@@ -595,6 +592,7 @@ try {
     debug: msg
   });
 }
+
 
     // 4) (Opcional) Dispara geração assíncrona se não houver preview e PREVIEW_WORKER_URL existir
     if (!hasPreview && process.env.PREVIEW_WORKER_URL) {
