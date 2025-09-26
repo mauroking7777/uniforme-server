@@ -2,11 +2,6 @@
 import express from 'express';
 import pool from '../db.js';
 import { auth as requireAuth } from './auth.js';
-// R2 (Cloudflare) – cliente e assinatura
-import { r2 } from './r2Client.js';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-
 
 const router = express.Router();
 
@@ -121,14 +116,6 @@ router.post('/setores/configuracao/ordens/:ordemId/receber', requireAuth, async 
         WHERE ordem_id = $2 AND setor_id = $3`,
       [req.user?.id || null, os.ordem_id, os.setor_id]
     );
-// vendedor enxerga "ACEITA"
-await pool.query(`
-  UPDATE public.ordem_producao_uniformes_dados_ordem
-     SET status = 'aceita'
-   WHERE id = $1
-`, [req.params.ordemId]);
-
-
 
     res.json({ ok: true, novo_status: 'recebido' });
   } catch (err) {
@@ -142,42 +129,23 @@ await pool.query(`
  *  - Permitido de 'aguardando' ou 'recebido'
  *  - Grava motivo e carimbo de devolução
  */
- router.post('/setores/configuracao/ordens/:ordemId/devolver', requireAuth, async (req, res) => {
+router.post('/setores/configuracao/ordens/:ordemId/devolver', requireAuth, async (req, res) => {
   const { ordemId } = req.params;
   const { motivo } = req.body || {};
-  const client = await pool.connect();
   try {
     if (!motivo || !String(motivo).trim()) {
-      client.release();
       return res.status(400).json({ erro: 'motivo é obrigatório.' });
     }
 
-    await client.query('BEGIN');
-
-    // carrega status do vínculo do setor (usando a mesma lógica do getStatusConfig)
-    const osq = await client.query(`
-      SELECT os.*, s.slug
-        FROM public.ordem_setores os
-        JOIN public.setores s ON s.id = os.setor_id
-       WHERE os.ordem_id = $1 AND s.slug = 'configuracao'
-       LIMIT 1
-    `, [Number(ordemId)]);
-    const os = osq.rows[0];
-    if (!os) {
-      await client.query('ROLLBACK');
-      client.release();
-      return res.status(404).json({ erro: 'Ordem sem setor de configuração.' });
-    }
+    const os = await getStatusConfig(ordemId);
+    if (!os) return res.status(404).json({ erro: 'Ordem sem setor de configuração.' });
 
     const st = String(os.status).toLowerCase();
     if (!['aguardando','recebido'].includes(st)) {
-      await client.query('ROLLBACK');
-      client.release();
       return res.status(409).json({ erro: `Estado inválido: ${os.status}. Permitidos: aguardando/recebido.` });
     }
 
-    // 1) marca devolvido no vínculo atual
-    await client.query(
+    await pool.query(
       `UPDATE public.ordem_setores
           SET status = 'devolvido',
               devolvido_por = $1,
@@ -187,30 +155,13 @@ await pool.query(`
       [req.user?.id || null, motivo, os.ordem_id, os.setor_id]
     );
 
-    // 2) status geral para o representante
-    await pool.query(`
-    UPDATE public.ordem_producao_uniformes_dados_ordem
-       SET status = 'devolvida',
-           motivo_devolucao = $2,
-           devolvida_em = NOW()
-     WHERE id = $1
-  `, [req.params.ordemId, motivo]);
-  
-
-    // 3) remove todos os vínculos com setores (some das filas)
-    await client.query(`DELETE FROM public.ordem_setores WHERE ordem_id = $1`, [os.ordem_id]);
-
-    await client.query('COMMIT');
-    client.release();
+    // Observação: quando o vendedor ajustar e ENVIAR novamente, você pode restaurar para 'aguardando' nesse mesmo registro.
     res.json({ ok: true, novo_status: 'devolvido' });
   } catch (err) {
-    try { await client.query('ROLLBACK'); } catch {}
-    client.release();
     console.error('POST devolver (configuração) erro:', err);
     res.status(500).json({ erro: 'Falha ao devolver a ordem no Setor de Configuração.' });
   }
 });
-
 
 /** POST /setores/configuracao/ordens/:ordemId/concluir
  * Regras:
@@ -235,168 +186,11 @@ router.post('/setores/configuracao/ordens/:ordemId/concluir', requireAuth, async
       [os.ordem_id, os.setor_id]
     );
 
-    // vendedor enxerga "CONFIGURADO"
-  await pool.query(`
-  UPDATE public.ordem_producao_uniformes_dados_ordem
-    SET status = 'configurado'
-  WHERE id = $1
-  `, [req.params.ordemId]);
-
-
     res.json({ ok: true, novo_status: 'configurado' });
   } catch (err) {
     console.error('POST concluir (configuração) erro:', err);
     res.status(500).json({ erro: 'Falha ao concluir a configuração da ordem.' });
   }
 });
-
-/**
- * GET /ordens/:ordemId/itens/:itemId/cdr/preview-url
- * Retorna URL ASSINADA para visualizar o preview do layout (imagem no R2).
- *
- * Regra:
- * 1) Tenta ler `preview_object_key` da tabela do item (ordem_producao_uniformes_dados_modelo).
- * 2) Se não tiver, tenta pegar o último arquivo de imagem do item em `ordem_item_arquivo`.
- */
- router.get('/ordens/:ordemId/itens/:itemId/cdr/preview-url', requireAuth, async (req, res) => {
-  const { ordemId, itemId } = req.params;
-  try {
-    // 1) tenta preview_object_key direto do item
-    const q1 = await pool.query(
-      `SELECT preview_object_key
-         FROM ordem_producao_uniformes_dados_modelo
-        WHERE id = $1 AND ordem_id = $2
-        LIMIT 1`,
-      [itemId, ordemId]
-    );
-
-    let objectKey = q1.rows[0]?.preview_object_key || null;
-
-    // 2) fallback: último arquivo de imagem do item
-    if (!objectKey) {
-      const q2 = await pool.query(
-        `SELECT key
-           FROM ordem_item_arquivo
-          WHERE item_id = $1
-            AND (content_type LIKE 'image/%'
-                 OR LOWER(nome_original) LIKE '%.png'
-                 OR LOWER(nome_original) LIKE '%.jpg'
-                 OR LOWER(nome_original) LIKE '%.jpeg'
-                 OR LOWER(nome_original) LIKE '%preview%')
-       ORDER BY id DESC
-          LIMIT 1`,
-        [itemId]
-      );
-      objectKey = q2.rows[0]?.key || null;
-    }
-
-    if (!objectKey) {
-      return res.status(404).json({ erro: 'Preview não encontrado para este item.' });
-    }
-
-    const url = await getSignedUrl(
-      r2,
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: objectKey }),
-      { expiresIn: 60 * 60 } // 1h
-    );
-
-    return res.json({ url });
-  } catch (err) {
-    console.error('preview-url erro:', err);
-    return res.status(500).json({ erro: 'Falha ao gerar URL do preview.' });
-  }
-});
-
-
-/**
- * GET /ordens/:ordemId/itens/:itemId/cdr/download-url
- * Retorna URL ASSINADA para baixar o CDR do item (arquivo de layout vetorial).
- *
- * Regra:
- *  - Pega o último arquivo do item com content_type CDR ou nome terminando em .cdr
- */
-router.get('/ordens/:ordemId/itens/:itemId/cdr/download-url', requireAuth, async (req, res) => {
-  const { ordemId, itemId } = req.params;
-  try {
-    const q = await pool.query(
-      `SELECT key
-         FROM ordem_item_arquivo
-        WHERE item_id = $1
-          AND (content_type = 'application/cdr'
-               OR LOWER(nome_original) LIKE '%.cdr')
-     ORDER BY id DESC
-        LIMIT 1`,
-      [itemId]
-    );
-
-    const objectKey = q.rows[0]?.key || null;
-    if (!objectKey) {
-      return res.status(404).json({ erro: 'Nenhum arquivo CDR encontrado para este item.' });
-    }
-
-    const url = await getSignedUrl(
-      r2,
-      new GetObjectCommand({ Bucket: process.env.R2_BUCKET, Key: objectKey }),
-      { expiresIn: 60 * 60 } // 1h
-    );
-
-    return res.json({ url });
-  } catch (err) {
-    console.error('download-url erro:', err);
-    return res.status(500).json({ erro: 'Falha ao gerar URL de download do CDR.' });
-  }
-});
-
-// Alias 1: /aceitar -> mesma lógica do /receber
-router.post('/setores/configuracao/ordens/:ordemId/aceitar', requireAuth, async (req, res) => {
-  // reaproveita a mesma atualização do /receber
-  // 1) ordem_setores -> 'recebido'
-  await pool.query(`
-    UPDATE public.ordem_setores
-       SET status = 'recebido',
-           recebido_por = $1,
-           recebido_em = NOW()
-     WHERE ordem_id = $2
-       AND setor_id = (SELECT id FROM public.setores WHERE slug='configuracao' LIMIT 1)
-  `, [req.user?.id || null, req.params.ordemId]);
-
-  // 2) status geral -> 'aceita'
-  await pool.query(`
-    UPDATE public.ordem_producao_uniformes_dados_ordem
-       SET status = 'aceita'
-     WHERE id = $1
-  `, [req.params.ordemId]);
-
-  res.json({ ok: true, novo_status: 'recebido' });
-});
-
-// Alias 2: /finalizar -> mesma lógica do /concluir
-router.post('/setores/configuracao/ordens/:ordemId/finalizar', requireAuth, async (req, res) => {
-  // 1) ordem_setores -> 'configurado'
-  await pool.query(`
-    UPDATE public.ordem_setores
-       SET status = 'configurado',
-           concluido_em = NOW()
-     WHERE ordem_id = $1
-       AND setor_id = (SELECT id FROM public.setores WHERE slug='configuracao' LIMIT 1)
-  `, [req.params.ordemId]);
-
-  // 2) status geral -> 'configurado'
-  await pool.query(`
-    UPDATE public.ordem_producao_uniformes_dados_ordem
-       SET status = 'configurado'
-     WHERE id = $1
-  `, [req.params.ordemId]);
-
-  res.json({ ok: true, novo_status: 'configurado' });
-});
-
-router.post('/setores/configuracao/ordens/:ordemId/itens/:itemId/finalizar', requireAuth, async (req, res) => {
-  // Se futuramente quiser gravar progresso por item, faça aqui.
-  res.json({ ok: true });
-});
-
-
-
 
 export default router;
