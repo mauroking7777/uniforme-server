@@ -561,7 +561,8 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
     }
 
 // 3) Inserir/registrar no banco — aderente ao schema real de `ordem_item_arquivo`
-const createdBy = req.user?.id ?? null;
+// Usa fallback seguro para created_by (evita NOT NULL)
+const createdBySafe = String(req.user?.id ?? 'system');
 
 const insertSql = `
   INSERT INTO ordem_item_arquivo
@@ -574,11 +575,11 @@ const insertSql = `
 const insertVals = [
   Number(ordemId),                          // $1 -> ordem_id
   Number(itemId),                           // $2 -> item_id
-  finalCdrKey,                              // $3 -> key (chave no R2 do CDR definitivo)
+  finalCdrKey,                              // $3 -> key (R2 do CDR definitivo)
   fileOriginalName || 'layout.cdr',         // $4 -> nome_original
-  'application/cdr',                        // $5 -> content_type (pode ajustar depois)
+  'application/cdr',                        // $5 -> content_type
   0,                                        // $6 -> tamanho_bytes (0 por enquanto)
-  createdBy                                 // $7 -> created_by (aceita null se schema permitir)
+  createdBySafe                             // $7 -> created_by (nunca null)
 ];
 
 let registro;
@@ -586,7 +587,7 @@ try {
   const r = await db.query(insertSql, insertVals);
   registro = r.rows?.[0];
 } catch (dbErr) {
-  console.error('Commit layout: erro ao inserir no banco.', dbErr);
+  console.error('Commit layout: erro ao inserir no banco ->', dbErr?.message || dbErr);
   return res.status(500).json({ erro: 'Falha ao salvar metadados no banco.' });
 }
 
