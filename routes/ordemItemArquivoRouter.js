@@ -481,123 +481,138 @@ router.get('/:ordemId/layout/stage/:stageId/preview-url', requireAuth, async (re
   }
 });
 
-// Commit do estágio (ORDEM) -> requer itemId já existente
-router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, res) => {
-  const client = await db.connect();
-  try {
-    const { ordemId, stageId } = req.params;
-    const { itemId, fileOriginalName, stageCdrKey } = req.body || {};
-    if (!itemId) return res.status(400).json({ erro: 'itemId é obrigatório no commit por ordem.' });
+// ======================================================
+// COMMIT do estágio de layout (tolerante a preview ausente)
+// ======================================================
+router.post('/ordens/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, res) => {
+  const { ordemId, stageId } = req.params;
+  const { itemId, fileOriginalName, stageCdrKey } = req.body || {};
 
-    // confere se item pertence à ordem
-    const own = await client.query(
-      'SELECT 1 FROM ordem_producao_uniformes_dados_modelo WHERE id = $1 AND ordem_id = $2',
-      [itemId, ordemId]
-    );
-    if (own.rowCount === 0) {
-      return res.status(400).json({ erro: 'Item não pertence à ordem.' });
+  // helpers
+  const bucket = process.env.R2_BUCKET;
+  if (!bucket) return res.status(500).json({ erro: 'Config R2_BUCKET ausente.' });
+
+  const stripStaging = (k) => String(k || '').replace(/^staging\//, '');
+  const dirname = (k) => {
+    const parts = String(k || '').split('/');
+    parts.pop();
+    return parts.join('/') + '/';
+  };
+
+  const exists = async (key) => {
+    try {
+      await r2.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return true;
+    } catch {
+      return false;
     }
+  };
 
-    // chaves do staging/finais
-    let keyStageCdr  = stageCdrKey || buildOrderStageCdrKey(ordemId, stageId, fileOriginalName || 'layout.cdr');
-    const keyStagePrev = buildOrderStagePreviewKey(ordemId, stageId);
-    const keyFinalCdr  = buildKey(ordemId, itemId, fileOriginalName || 'layout.cdr');
-    const keyFinalPrev = buildPreviewKey(ordemId, itemId, 'preview.png');
-
-    // garante que o CDR temporário existe; tenta fallback "layout.cdr"
-    if (!(await headExists(keyStageCdr))) {
-      const alt = buildOrderStageCdrKey(ordemId, stageId, 'layout.cdr');
-      if (await headExists(alt)) keyStageCdr = alt;
-      else return res.status(400).json({ erro: 'CDR temporário não localizado.' });
-    }
-
-    await client.query('BEGIN');
-
-    // copia CDR definitivo
+  const copy = async (srcKey, dstKey) => {
     await r2.send(new CopyObjectCommand({
-      Bucket: R2_BUCKET,
-      CopySource: `/${R2_BUCKET}/${keyStageCdr}`,
-      Key: keyFinalCdr,
-      ContentType: 'application/octet-stream',
-      MetadataDirective: 'REPLACE'
+      Bucket: bucket,
+      CopySource: `/${bucket}/${srcKey}`,
+      Key: dstKey,
+      MetadataDirective: 'REPLACE' // evita herdar metadata antiga
     }));
+  };
 
-    // soft-delete dos CDRs antigos + registro do novo (mantém como está no seu arquivo) …
-    // (deixe o restante do bloco exatamente como já está, inclusive o trecho do PREVIEW abaixo)
-    // soft-delete CDRs anteriores
-    await client.query(
-      `UPDATE ordem_item_arquivo
-          SET deleted_at = NOW()
-        WHERE item_id = $1 AND deleted_at IS NULL AND key LIKE '%/corel/%'`,
-      [itemId]
-    );
-
-    // registra novo CDR
-    await client.query(
-      `INSERT INTO ordem_item_arquivo
-         (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,'uploaded',$7)`,
-      [
-        ordemId,
-        itemId,
-        keyFinalCdr,
-        fileOriginalName || 'layout.cdr',
-        'application/octet-stream',
-        null,
-        req.user?.id || null,
-      ]
-    );
-
-// PREVIEW final: se existir no stage, copia; senão, gera agora a partir do CDR
-if (await headExists(keyStagePrev)) {
-  await r2.send(new CopyObjectCommand({
-    Bucket: R2_BUCKET,
-    CopySource: `/${R2_BUCKET}/${keyStagePrev}`,
-    Key: keyFinalPrev,
-    ContentType: 'image/png',
-    CacheControl: 'public, max-age=31536000, immutable',
-    MetadataDirective: 'REPLACE'
-  }));
-} else {
   try {
-    const cdrUrl = await presignGet(keyStageCdr, 60 * 10, 'application/octet-stream');
-    const putUrl  = await presignPut(keyFinalPrev, 'image/png', 60 * 10);
-    await callWorkerConvertPut(cdrUrl, putUrl, 3000);
+    if (!itemId || !stageCdrKey) {
+      return res.status(400).json({ erro: 'itemId e stageCdrKey são obrigatórios.' });
+    }
+
+    // 1) CDR: staging -> definitivo (obrigatório)
+    const finalCdrKey = stripStaging(stageCdrKey); // ex.: remove "staging/"
+    const haveStageCdr = await exists(stageCdrKey);
+    if (!haveStageCdr) {
+      return res.status(400).json({ erro: 'CDR temporário não encontrado no staging.' });
+    }
+    await copy(stageCdrKey, finalCdrKey);
+
+    // 2) PREVIEW: tentar achar no staging, mas NÃO falhar se não existir
+    const stageFolder = dirname(stageCdrKey);
+    const finalFolder = stripStaging(stageFolder);
+
+    let stagePreviewKey = null;
+    let finalPreviewKey = null;
+    let hasPreview = false;
+
+    try {
+      // lista objetos .png no mesmo diretório de staging
+      const listed = await r2.send(new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: stageFolder
+      }));
+
+      const png = (listed.Contents || []).map(o => o.Key).find(k => String(k).toLowerCase().endsWith('.png'));
+      if (png) {
+        stagePreviewKey = png;
+        finalPreviewKey = stripStaging(png);
+        await copy(stagePreviewKey, finalPreviewKey);
+        hasPreview = true;
+      } else {
+        hasPreview = false;
+      }
+    } catch (e) {
+      // Qualquer falha com preview NÃO impede o commit
+      console.warn('Commit layout: preview ausente ou falha ao copiar (prosseguindo mesmo assim).', e?.message || e);
+      hasPreview = false;
+    }
+
+    // 3) Inserir/registrar no banco (preview pode ser null)
+    // Ajuste os nomes de colunas conforme seu schema real:
+    const createdBy = req.user?.id ?? null;
+
+    const insertSql = `
+      INSERT INTO ordem_item_arquivo
+        (ordem_item_id, tipo, nome_arquivo, cdr_key, preview_key, created_by)
+      VALUES
+        ($1, 'layout', $2, $3, $4, $5)
+      RETURNING id
+    `;
+    const insertVals = [itemId, fileOriginalName || 'layout.cdr', finalCdrKey, hasPreview ? finalPreviewKey : null, createdBy];
+
+    let registro;
+    try {
+      const r = await db.query(insertSql, insertVals);
+      registro = r.rows?.[0];
+    } catch (dbErr) {
+      // Se o banco exigir created_by NOT NULL e o token veio vazio, loga claro
+      console.error('Commit layout: erro ao inserir no banco.', dbErr);
+      return res.status(500).json({ erro: 'Falha ao salvar metadados no banco.' });
+    }
+
+    // 4) (Opcional) Dispara geração assíncrona se não houver preview e PREVIEW_WORKER_URL existir
+    if (!hasPreview && process.env.PREVIEW_WORKER_URL) {
+      try {
+        // Não aguardamos a resposta; só dispara e vida que segue
+        fetch(process.env.PREVIEW_WORKER_URL, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ordemId,
+            itemId,
+            cdrKey: finalCdrKey
+          })
+        }).catch(() => {});
+      } catch {}
+    }
+
+    return res.json({
+      ok: true,
+      arquivoId: registro?.id,
+      cdrKey: finalCdrKey,
+      previewKey: hasPreview ? finalPreviewKey : null,
+      hasPreview
+    });
+
   } catch (e) {
-    console.error('fallback gerar preview final no commit (ordem) falhou:', e);
-    return res.status(400).json({ erro: 'Preview temporário não localizado.' });
-  }
-}
-
-
-
-    // atualiza campos do item (preview)
-    await client.query(
-      `UPDATE ordem_producao_uniformes_dados_modelo
-       SET preview_status     = 'ready',
-           preview_object_key = $2,
-           preview_error      = NULL,
-           preview_updated_at = NOW(),
-           layout_stage_id    = NULL
-       WHERE id = $1`,
-      [itemId, keyFinalPrev]
-    );
-    
-
-    // apaga staging
-    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStagePrev })); } catch {}
-    try { await r2.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: keyStageCdr  })); } catch {}
-
-    await client.query('COMMIT');
-    return res.json({ ok: true, cdrKey: keyFinalCdr, previewKey: keyFinalPrev });
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    console.error('ordem layout/stage commit erro:', e);
+    console.error('layout/stage commit erro:', e);
     return res.status(500).json({ erro: 'Falha ao confirmar layout.' });
-  } finally {
-    client.release();  
   }
 });
+
 
 // Cancel do estágio (ORDEM)
 router.post('/:ordemId/layout/stage/:stageId/cancel', requireAuth, async (req, res) => {
