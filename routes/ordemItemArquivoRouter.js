@@ -560,28 +560,35 @@ router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, r
       hasPreview = false;
     }
 
-    // 3) Inserir/registrar no banco (preview pode ser null)
-    // Ajuste os nomes de colunas conforme seu schema real:
-    const createdBy = req.user?.id ?? null;
+// 3) Inserir/registrar no banco — aderente ao schema real de `ordem_item_arquivo`
+const createdBy = req.user?.id ?? null;
 
-    const insertSql = `
-      INSERT INTO ordem_item_arquivo
-        (ordem_item_id, tipo, nome_arquivo, cdr_key, preview_key, created_by)
-      VALUES
-        ($1, 'layout', $2, $3, $4, $5)
-      RETURNING id
-    `;
-    const insertVals = [itemId, fileOriginalName || 'layout.cdr', finalCdrKey, hasPreview ? finalPreviewKey : null, createdBy];
+const insertSql = `
+  INSERT INTO ordem_item_arquivo
+    (ordem_id, item_id, key, nome_original, content_type, tamanho_bytes, status, created_by)
+  VALUES
+    ($1,       $2,      $3,  $4,            $5,            $6,            'ativo', $7)
+  RETURNING id
+`;
 
-    let registro;
-    try {
-      const r = await db.query(insertSql, insertVals);
-      registro = r.rows?.[0];
-    } catch (dbErr) {
-      // Se o banco exigir created_by NOT NULL e o token veio vazio, loga claro
-      console.error('Commit layout: erro ao inserir no banco.', dbErr);
-      return res.status(500).json({ erro: 'Falha ao salvar metadados no banco.' });
-    }
+const insertVals = [
+  Number(ordemId),                          // $1 -> ordem_id
+  Number(itemId),                           // $2 -> item_id
+  finalCdrKey,                              // $3 -> key (chave no R2 do CDR definitivo)
+  fileOriginalName || 'layout.cdr',         // $4 -> nome_original
+  'application/cdr',                        // $5 -> content_type (pode ajustar depois)
+  0,                                        // $6 -> tamanho_bytes (0 por enquanto)
+  createdBy                                 // $7 -> created_by (aceita null se schema permitir)
+];
+
+let registro;
+try {
+  const r = await db.query(insertSql, insertVals);
+  registro = r.rows?.[0];
+} catch (dbErr) {
+  console.error('Commit layout: erro ao inserir no banco.', dbErr);
+  return res.status(500).json({ erro: 'Falha ao salvar metadados no banco.' });
+}
 
     // 4) (Opcional) Dispara geração assíncrona se não houver preview e PREVIEW_WORKER_URL existir
     if (!hasPreview && process.env.PREVIEW_WORKER_URL) {
