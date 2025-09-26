@@ -587,8 +587,13 @@ try {
   const r = await db.query(insertSql, insertVals);
   registro = r.rows?.[0];
 } catch (dbErr) {
-  console.error('Commit layout: erro ao inserir no banco ->', dbErr?.message || dbErr);
-  return res.status(500).json({ erro: 'Falha ao salvar metadados no banco.' });
+  // DEBUG TEMPORÁRIO — expõe a mensagem do Postgres pra acharmos a causa
+  const msg = dbErr?.detail || dbErr?.message || String(dbErr);
+  console.error('Commit layout: erro ao inserir no banco ->', msg);
+  return res.status(500).json({
+    erro: 'Falha ao salvar metadados no banco.',
+    debug: msg
+  });
 }
 
     // 4) (Opcional) Dispara geração assíncrona se não houver preview e PREVIEW_WORKER_URL existir
