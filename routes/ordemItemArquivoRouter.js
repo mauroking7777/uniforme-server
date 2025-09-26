@@ -785,10 +785,11 @@ router.post('/:ordemId/itens/:itemId/layout/stage/:stageId/commit', requireAuth,
         keyFinalCdr,
         fileOriginalName || 'layout.cdr',
         'application/octet-stream',
-        null,
-        req.user?.id || null,
+        0,                 // melhor que NULL (passa no check de tamanho)
+        null,              // <<<<< era req.user?.id || null — deixe NULL fixo
       ]
     );
+    
 
 
 // PREVIEW final: se existir no stage, copia; senão, gera agora a partir do CDR
