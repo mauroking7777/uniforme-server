@@ -484,7 +484,7 @@ router.get('/:ordemId/layout/stage/:stageId/preview-url', requireAuth, async (re
 // ======================================================
 // COMMIT do estágio de layout (tolerante a preview ausente)
 // ======================================================
-router.post('/ordens/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, res) => {
+router.post('/:ordemId/layout/stage/:stageId/commit', requireAuth, async (req, res) => {
   const { ordemId, stageId } = req.params;
   const { itemId, fileOriginalName, stageCdrKey } = req.body || {};
 
