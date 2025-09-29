@@ -73,6 +73,14 @@ router.post('/ordens-uniformes/:ordemId/setores', requireAuth, async (req, res) 
   try {
     const { ordemId } = req.params;
     let { setor_ids: setorIds, slugs } = req.body || {};
+    // garante que, se o front marcar 'sublimacao', também salvaremos 'configuracao'
+if (Array.isArray(slugs)) {
+  const norm = slugs.map(s => String(s).toLowerCase());
+  if (norm.includes('sublimacao') && !norm.includes('configuracao')) {
+    slugs = [...slugs, 'configuracao'];
+  }
+}
+
 
     if (!(await ordemExiste(ordemId))) {
       return res.status(404).json({ erro: 'Ordem não encontrada.' });
