@@ -72,8 +72,9 @@ function onlyImage(nome, contentType) {
 function buildPreviewKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'preview').replace(/\.(png|jpg|jpeg)$/i, ''));
   const ext = (originalName || '').toLowerCase().endsWith('.png') ? 'png' : 'jpg';
-  return `previews/${ordemId}/${itemId}/${Date.now()}_${crypto.randomUUID()}_${base}.${ext}`;
+  return `ordens/${ordemId}/itens/${itemId}/previews/${Date.now()}_${crypto.randomUUID()}_${base}.${ext}`;
 }
+
 
 function buildKey(ordemId, itemId, originalName) {
   const base = sanitizeFileName((originalName || 'layout').replace(/\.cdr$/i, ''));
@@ -153,32 +154,51 @@ router.post('/:ordemId/itens/:itemId/preview/upload-url', requireAuth, async (re
   }
 });
 
-// 2) Confirma o preview após o PUT no R2
-router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, res) => {
+// 3) URL do PREVIEW mais recente (assina GET no R2)
+// 200: { url } se pronto; 202: pendente; 404: não há preview
+router.get('/:ordemId/itens/:itemId/preview/url', requireAuth, async (req, res) => {
   try {
     const { ordemId, itemId } = req.params;
-    const { objectKey } = req.body || {};
-    if (!objectKey) return res.status(400).json({ erro: 'objectKey ausente.' });
-    if (!String(objectKey).startsWith(`previews/${ordemId}/${itemId}/`)) {
-      return res.status(400).json({ erro: 'objectKey não confere com ordem/item.' });
-    }
 
-    await db.query(
-      `UPDATE ordem_producao_uniformes_dados_modelo
-         SET preview_status = 'ready',
-             preview_object_key = $2,
-             preview_error = NULL,
-             preview_updated_at = NOW()
-       WHERE id = $1`,
-      [itemId, objectKey]
+    // Busca status e chave do preview no item
+    const q = await db.query(
+      `SELECT preview_status, preview_object_key
+         FROM ordem_producao_uniformes_dados_modelo
+        WHERE id = $1 AND ordem_id = $2
+        LIMIT 1`,
+      [itemId, ordemId]
     );
 
-    return res.json({ ok: true });
+    if (q.rowCount === 0) {
+      return res.status(404).json({ erro: 'Item não encontrado.' });
+    }
+
+    const { preview_status, preview_object_key } = q.rows[0];
+
+    if (preview_status === 'pending') {
+      return res.status(202).json({ status: 'pending' });
+    }
+    if (!preview_object_key) {
+      return res.status(404).json({ erro: 'Sem preview para este item.' });
+    }
+
+    // assina GET no R2
+    const url = await getSignedUrl(
+      r2,
+      new GetObjectCommand({
+        Bucket: R2_BUCKET,
+        Key: preview_object_key,
+      }),
+      { expiresIn: 60 * 10 }
+    );
+
+    return res.json({ url, expiresInSec: 600 });
   } catch (e) {
-    console.error('preview confirm erro:', e);
-    return res.status(500).json({ erro: 'Falha ao confirmar preview.' });
+    console.error('preview url erro:', e);
+    return res.status(500).json({ erro: 'Falha ao gerar URL do preview.' });
   }
 });
+
 
 /* =========================================================
  * CDR (upload via multipart OU via presigned PUT)
