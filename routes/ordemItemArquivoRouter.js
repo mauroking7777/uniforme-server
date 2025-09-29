@@ -154,6 +154,56 @@ router.post('/:ordemId/itens/:itemId/preview/upload-url', requireAuth, async (re
   }
 });
 
+// 2) CONFIRM do PREVIEW (registra a chave e marca como READY)
+router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, res) => {
+  try {
+    const { ordemId, itemId } = req.params;
+    const { objectKey, nome_arquivo, content_type, tamanho_bytes } = req.body || {};
+
+    // 1) Consistência básica
+    if (!(await assertItemDaOrdem(ordemId, itemId))) {
+      return res.status(400).json({ erro: 'Item não pertence à ordem informada.' });
+    }
+    if (!objectKey) {
+      return res.status(400).json({ erro: 'objectKey é obrigatório.' });
+    }
+
+    // 2) Valida caminho e extensão (png/jpg/jpeg)
+    const pathOK = String(objectKey).includes(`/ordens/${ordemId}/itens/${itemId}/previews/`);
+    const isPng = /\.png$/i.test(objectKey);
+    const isJpg = /\.(jpg|jpeg)$/i.test(objectKey);
+    if (!pathOK || !(isPng || isJpg)) {
+      return res.status(400).json({ erro: 'objectKey inválido para preview.' });
+    }
+
+    // 3) Atualiza o item com a chave e marca READY
+    await db.query(
+      `UPDATE ordem_producao_uniformes_dados_modelo
+          SET preview_object_key = $1,
+              preview_status = 'ready',
+              preview_error = NULL,
+              preview_updated_at = NOW()
+        WHERE id = $2`,
+      [objectKey, itemId]
+    );
+
+    // (opcional) você pode guardar meta (nome, type, size) em colunas próprias no futuro
+    return res.json({
+      ok: true,
+      objectKey,
+      meta: {
+        nome_arquivo: nome_arquivo || null,
+        content_type: content_type || null,
+        tamanho_bytes: Number(tamanho_bytes) || null,
+      }
+    });
+  } catch (e) {
+    console.error('preview confirm erro:', e);
+    return res.status(500).json({ erro: 'Falha ao confirmar preview.' });
+  }
+});
+
+
 // 3) URL do PREVIEW mais recente (assina GET no R2)
 // 200: { url } se pronto; 202: pendente; 404: não há preview
 router.get('/:ordemId/itens/:itemId/preview/url', requireAuth, async (req, res) => {
