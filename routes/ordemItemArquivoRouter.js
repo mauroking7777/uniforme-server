@@ -168,13 +168,20 @@ router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, 
       return res.status(400).json({ erro: 'objectKey é obrigatório.' });
     }
 
-    // 2) Valida caminho e extensão (png/jpg/jpeg)
-    const pathOK = String(objectKey).includes(`ordens/${ordemId}/itens/${itemId}/previews/`) || // sem barra inicial (como o backend gera)
-    const isPng = /\.png$/i.test(objectKey);
-    const isJpg = /\.(jpg|jpeg)$/i.test(objectKey);
-    if (!pathOK || !(isPng || isJpg)) {
-      return res.status(400).json({ erro: 'objectKey inválido para preview.' });
-    }
+// 2) Valida caminho e extensão (png/jpg/jpeg)
+const keyStr = String(objectKey);
+
+const pathOK =
+  keyStr.includes(`ordens/${ordemId}/itens/${itemId}/previews/`) || // sem barra inicial (como o backend gera)
+  keyStr.includes(`/ordens/${ordemId}/itens/${itemId}/previews/`);  // aceita também com barra inicial
+
+const isPng = /\.png$/i.test(keyStr);
+const isJpg = /\.(jpg|jpeg)$/i.test(keyStr);
+
+if (!pathOK || !(isPng || isJpg)) {
+  return res.status(400).json({ erro: 'objectKey inválido para preview.' });
+}
+
 
     // 3) Atualiza o item com a chave e marca READY
     await db.query(
