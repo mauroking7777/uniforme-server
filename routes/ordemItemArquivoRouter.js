@@ -169,7 +169,7 @@ router.post('/:ordemId/itens/:itemId/preview/confirm', requireAuth, async (req, 
     }
 
     // 2) Valida caminho e extensão (png/jpg/jpeg)
-    const pathOK = String(objectKey).includes(`/ordens/${ordemId}/itens/${itemId}/previews/`);
+    const pathOK = String(objectKey).includes(`ordens/${ordemId}/itens/${itemId}/previews/`) || // sem barra inicial (como o backend gera)
     const isPng = /\.png$/i.test(objectKey);
     const isJpg = /\.(jpg|jpeg)$/i.test(objectKey);
     if (!pathOK || !(isPng || isJpg)) {
